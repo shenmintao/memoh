@@ -1052,10 +1052,7 @@ func (h *SessionHandler) resolveCreateSessionWorkdir(ctx context.Context, botID,
 	if err != nil {
 		return nil, workdirHTTPError(h.logger, err)
 	}
-	if runtimeType == session.RuntimeACPAgent && bound.TargetKind == workdir.TargetKindRemote {
-		return nil, echo.NewHTTPError(http.StatusBadRequest,
-			"ACP sessions cannot use a remote computer workdir yet; bind a native workspace workdir instead")
-	}
+
 	return &bound, nil
 }
 

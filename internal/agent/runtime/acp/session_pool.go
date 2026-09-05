@@ -1594,10 +1594,11 @@ func (p *SessionPool) startRuntime(ctx context.Context, h *runtimeHandle, opts s
 	}
 	supportsSessionState := len(profile.RuntimeStorage.SessionRoots) > 0
 	resolved, err := client.ResolveSessionContext(client.SessionContextInput{
-		AgentID:     h.agentID,
-		SetupMode:   mode,
-		Backend:     workspaceInfo.Backend,
-		ProjectPath: h.projectPath,
+		AgentID:       h.agentID,
+		SetupMode:     mode,
+		Backend:       workspaceInfo.Backend,
+		WorkspaceRoot: workspaceInfo.DefaultWorkDir,
+		ProjectPath:   h.projectPath,
 	})
 	if err != nil {
 		return fail(fmt.Errorf("resolve ACP session context: %w", err))

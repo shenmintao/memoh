@@ -77,6 +77,34 @@ func TestSafeRequestLogURIStripsPublicMediaQuery(t *testing.T) {
 	}
 }
 
+func TestSafeRequestLogURIRedactsSensitiveQueryValues(t *testing.T) {
+	t.Parallel()
+
+	u, err := neturl.Parse("/bots/bot-1/web/ws?foo=ok&TOKEN=jwt-secret&access_token=oauth-secret")
+	if err != nil {
+		t.Fatalf("parse url: %v", err)
+	}
+	got := safeRequestLogURI(u, u.RequestURI())
+	want := "/bots/bot-1/web/ws?TOKEN=%5BREDACTED%5D&access_token=%5BREDACTED%5D&foo=ok"
+	if got != want {
+		t.Fatalf("safeRequestLogURI = %q, want %q", got, want)
+	}
+}
+
+func TestSafeRequestLogURILeavesOrdinaryQueryUnchanged(t *testing.T) {
+	t.Parallel()
+
+	u, err := neturl.Parse("/search?page=2&q=memoh")
+	if err != nil {
+		t.Fatalf("parse url: %v", err)
+	}
+	got := safeRequestLogURI(u, u.RequestURI())
+	want := u.RequestURI()
+	if got != want {
+		t.Fatalf("safeRequestLogURI = %q, want %q", got, want)
+	}
+}
+
 func TestShouldSkipJWT_MCPOAuthCallbackPaths(t *testing.T) {
 	t.Parallel()
 

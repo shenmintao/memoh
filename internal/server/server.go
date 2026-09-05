@@ -174,8 +174,32 @@ func safeRequestLogURI(u *neturl.URL, fallback string) string {
 	if isPublicChannelMediaPath(escapedPath) {
 		return escapedPath
 	}
+	if u.RawQuery != "" {
+		safeURL := *u
+		query := safeURL.Query()
+		redacted := false
+		for key := range query {
+			if isSensitiveRequestQueryKey(key) {
+				query.Set(key, "[REDACTED]")
+				redacted = true
+			}
+		}
+		if redacted {
+			safeURL.RawQuery = query.Encode()
+			return safeURL.RequestURI()
+		}
+	}
 	if fallback != "" {
 		return fallback
 	}
 	return u.RequestURI()
+}
+
+func isSensitiveRequestQueryKey(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "token", "access_token", "refresh_token", "id_token", "code", "api_key", "apikey", "key", "password", "secret", "signature", "sig":
+		return true
+	default:
+		return false
+	}
 }

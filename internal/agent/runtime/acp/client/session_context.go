@@ -10,10 +10,11 @@ import (
 const HermesContainerHome = dataMountPath + "/.memoh-hermes"
 
 type SessionContextInput struct {
-	AgentID     string
-	SetupMode   SetupMode
-	Backend     string
-	ProjectPath string
+	AgentID      string
+	SetupMode    SetupMode
+	Backend      string
+	WorkspaceRoot string
+	ProjectPath  string
 }
 
 type ResolvedSessionContext struct {
@@ -28,16 +29,28 @@ type ResolvedSessionContext struct {
 
 func ResolveSessionContext(input SessionContextInput) (ResolvedSessionContext, error) {
 	var backend WorkspaceBackend
+	var resolvedRoot, projectPath string
 	switch strings.ToLower(strings.TrimSpace(input.Backend)) {
 	case "", bridge.WorkspaceBackendContainer:
 		backend = WorkspaceBackendContainer
+		resolvedRoot = dataMountPath
+		var err error
+		projectPath, err = ResolvePathUnderVirtualRoot(resolvedRoot, input.ProjectPath)
+		if err != nil {
+			return ResolvedSessionContext{}, err
+		}
+	case bridge.WorkspaceBackendRemote:
+		backend = WorkspaceBackendRemote
+		resolvedRoot = strings.TrimSpace(input.WorkspaceRoot)
+		projectPath = strings.TrimSpace(input.ProjectPath)
+		if projectPath == "" {
+			projectPath = resolvedRoot
+		}
+		if resolvedRoot == "" || projectPath == "" {
+			return ResolvedSessionContext{}, fmt.Errorf("remote workspace paths are incomplete")
+		}
 	default:
 		return ResolvedSessionContext{}, fmt.Errorf("unsupported workspace backend %q", input.Backend)
-	}
-	resolvedRoot := dataMountPath
-	projectPath, err := ResolvePathUnderVirtualRoot(resolvedRoot, input.ProjectPath)
-	if err != nil {
-		return ResolvedSessionContext{}, err
 	}
 
 	ctx := ResolvedSessionContext{
@@ -56,8 +69,9 @@ func ResolveSessionContext(input SessionContextInput) (ResolvedSessionContext, e
 
 func resolveWorkspacePaths(info bridge.WorkspaceInfo, rawProjectPath string) (string, string, WorkspaceBackend, error) {
 	ctx, err := ResolveSessionContext(SessionContextInput{
-		Backend:     info.Backend,
-		ProjectPath: rawProjectPath,
+		Backend:       info.Backend,
+		WorkspaceRoot: info.DefaultWorkDir,
+		ProjectPath:   rawProjectPath,
 	})
 	if err != nil {
 		return "", "", WorkspaceBackendContainer, err

@@ -47,6 +47,7 @@ type WorkspaceBackend string
 
 const (
 	WorkspaceBackendContainer WorkspaceBackend = "container"
+	WorkspaceBackendRemote    WorkspaceBackend = "remote"
 )
 
 type SetupMode string
@@ -232,6 +233,12 @@ func normalizeSetupMode(mode SetupMode) SetupMode {
 
 func resolveCommand(ctx context.Context, client *bridge.Client, command, workDir string, env []string, opts processOptions) (string, error) {
 	command = strings.TrimSpace(command)
+	// Remote Runtime uses the host-native shell and PATH. Unix command -v/test
+	// probes are invalid on Windows; command admission is enforced by the
+	// authenticated Remote Runtime and an unavailable executable fails at spawn.
+	if opts.Backend == WorkspaceBackendRemote {
+		return command, nil
+	}
 	resolved, lastResult, err := resolveCommandOnce(ctx, client, command, workDir, env, opts)
 	if err != nil || resolved != "" {
 		if resolved != "" || err != nil {

@@ -51,6 +51,7 @@ type runtimeArtifactSnapshot struct {
 type runtimeLease struct {
 	client           *bridge.Client
 	logger           *slog.Logger
+	remote           bool
 	root             string
 	agentID          string
 	botID            string
@@ -94,6 +95,22 @@ func prepareRuntimeLeaseUnguarded(ctx context.Context, client *bridge.Client, op
 	profile, ok := acpprofile.Lookup(opts.AgentID)
 	if !ok {
 		return nil, fmt.Errorf("ACP profile %q is not registered", opts.AgentID)
+	}
+	if opts.Backend == WorkspaceBackendRemote {
+		// Remote Runtime already provides a user-home sandbox, native process
+		// supervision, and a host-correct environment. The container runtime
+		// lease below is deliberately Linux-specific (/data, /tmp, chmod).
+		return &runtimeLease{
+			client:    client,
+			logger:    opts.Logger,
+			remote:    true,
+			agentID:   acpprofile.NormalizeAgentID(profile.ID),
+			botID:     strings.TrimSpace(opts.BotID),
+			agentEnv:  append([]string(nil), opts.Env...),
+			toolEnv:   append([]string(nil), opts.Env...),
+			unsetEnv:  append([]string(nil), opts.UnsetEnv...),
+			snapshots: make(map[string]*runtimeArtifactSnapshot),
+		}, nil
 	}
 	modeName := string(normalizeSetupMode(opts.SetupMode))
 	storageMode, ok := profile.RuntimeStorage.Modes[modeName]
@@ -337,6 +354,9 @@ func (l *runtimeLease) stageFile(ctx context.Context, rule acpprofile.RuntimeArt
 }
 
 func (l *runtimeLease) Sync(ctx context.Context) error {
+	if l == nil || l.remote {
+		return nil
+	}
 	return l.withRuntimeSyncGuard(ctx, func(guardCtx context.Context) error {
 		return l.sync(guardCtx, true, nil)
 	})
@@ -780,6 +800,10 @@ func (l *runtimeLease) cleanup(ctx context.Context) error {
 	l.cleanupMu.Lock()
 	defer l.cleanupMu.Unlock()
 	if l.cleaned {
+		return nil
+	}
+	if l.remote {
+		l.cleaned = true
 		return nil
 	}
 	if !validOwnedRuntimeRoot(l.root, l.agentID) {

@@ -233,7 +233,7 @@ func genericACPProfile() Profile {
 				Help:        "Optional process arguments, one argument per line.",
 			},
 		},
-		SupportedBackends: []string{"container"},
+		SupportedBackends: []string{"container", "remote"},
 		// api_key is an internal managed-mode marker here; generic ACP has no
 		// authentication UI of its own and only needs Memoh-managed launch data.
 		SetupModes: []string{setupModeAPIKey},
