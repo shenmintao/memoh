@@ -19,7 +19,7 @@
 
 ## 发布
 
-1. `git clone --recurse-submodules https://github.com/shenmintao/memoh.git`。
+1. `git clone --recurse-submodules https://github.com/shenmintao/memoh.git`。进入仓库后运行 `gh repo set-default shenmintao/memoh`，明确 GitHub CLI 的默认操作仓库。
 2. 参考上游 README 配置本地开发环境；运行 `go test ./...`、`golangci-lint run ./...`，以及 `pnpm install --frozen-lockfile` 后的前端检查。
 3. 同步上游：`git fetch upstream`，`git merge upstream/main`。新 clone 需先 `git remote add upstream https://github.com/felinics/Memoh.git`。解决冲突后重点回归队列、ACP、MCP 鉴权与缓存。
 4. 更新定制版本说明，推送版本标签；手动运行 Custom Release，上传 Linux amd64/arm64 server/channel/bridge/mcp、完整源码及 SHA256SUMS 到草稿 Release。二进制写入版本标签、提交号和构建时间。Web 镜像按上游 Dockerfile 构建，不能仅替换后端来完成跨版本升级。
@@ -27,6 +27,8 @@
 
 原上游 npm 发布 workflow 保存在本目录供同步参考，定制仓库不向上游 npm 命名空间发布。
 上游 AGENTS.md 与模型能力定时任务在定制仓库默认不运行，维护者仍可手动触发。
+
+2026-09-10 已将本仓库迁入 `felinics/Memoh` 的正式 GitHub fork 网络。迁移时保留定制主分支 `6b5f9201` 的全部历史与文件内容；原独立仓库及其 CI 历史归档于 [memoh-standalone-backup-20260910](https://github.com/shenmintao/memoh-standalone-backup-20260910)。Custom Release 通过 `GH_REPO` 明确使用运行工作流的仓库作为发布目标。
 
 ## 本次验证（2026-09-10）
 
