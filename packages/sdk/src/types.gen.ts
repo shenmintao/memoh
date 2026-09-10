@@ -1371,6 +1371,10 @@ export type ConversationUiTurn = {
     platform?: string;
     reply?: ConversationUiReplyRef;
     role: 'user' | 'assistant' | 'system';
+    /**
+     * A running task can contain several user turns after supplements.
+     */
+    run_id?: string;
     sender_avatar_url?: string;
     sender_display_name?: string;
     sender_user_id?: string;

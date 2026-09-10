@@ -19,6 +19,7 @@ import (
 
 	"github.com/felinics/memoh/internal/agent/event"
 	acpprofile "github.com/felinics/memoh/internal/agent/runtime/acp/profile"
+	"github.com/felinics/memoh/internal/agent/turn"
 	"github.com/felinics/memoh/internal/mcp"
 	"github.com/felinics/memoh/internal/toolcontext"
 	"github.com/felinics/memoh/internal/version"
@@ -112,6 +113,7 @@ type PromptImage struct {
 }
 
 type PromptOptions struct {
+	InjectCh          <-chan turn.InjectMessage
 	ToolOutputLimit   ToolOutputLimit
 	Images            []PromptImage
 	AllowResourceOnly bool
@@ -854,10 +856,14 @@ func (s *Session) PromptWithToolContextOptions(ctx context.Context, prompt strin
 		return PromptResult{}, fmt.Errorf("prepare ACP session-state receipt: %w", receiptErr)
 	}
 
+	stopSteering := s.forwardSteering(promptCtx, conn, sessionID, toolSession.RunID, options.InjectCh)
+	defer stopSteering()
 	resp, err := conn.Prompt(promptCtx, acp.PromptRequest{
+		Meta:      map[string]any{"memoh/runId": toolSession.RunID},
 		SessionId: sessionID,
 		Prompt:    promptBlocks,
 	})
+	stopSteering()
 	stateReceipt, receiptErr := callbacks.finishSessionStateReceipt(stateReceiptCollector, err == nil)
 	var runtimeGuardErr error
 	if proc != nil {

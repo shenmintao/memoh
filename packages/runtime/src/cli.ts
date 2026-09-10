@@ -3,8 +3,13 @@
 import { homedir } from 'node:os'
 
 import { RuntimeSession } from './session'
+import { runtimeClientVersion } from './version'
 
 async function main(args: string[]): Promise<void> {
+  if (args.includes('--version') || args.includes('-v')) {
+    console.log(runtimeClientVersion)
+    return
+  }
   if (args.includes('--help') || args.includes('-h')) {
     usage(0)
   }
@@ -18,6 +23,7 @@ async function main(args: string[]): Promise<void> {
     throw new Error('--server and --key are required (or set MEMOH_RUNTIME_SERVER and MEMOH_RUNTIME_KEY)')
   }
   const workspaceBase = homedir()
+  console.log(`Memoh Runtime ${runtimeClientVersion}`)
   const controller = new AbortController()
   const stop = () => controller.abort()
   process.once('SIGINT', stop)
@@ -54,6 +60,7 @@ function valueAfter(args: string[], name: string): string | undefined {
 
 function usage(exitCode: number): never {
   console.error('Usage: memoh-runtime --server <url> --key <key> [--team-id <uuid>] [--insecure-localhost]')
+  console.error('       memoh-runtime --version')
   process.exit(exitCode)
 }
 

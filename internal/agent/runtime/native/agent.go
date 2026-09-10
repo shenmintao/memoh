@@ -410,6 +410,12 @@ func (a *Agent) runStream(ctx context.Context, cfg RunConfig, ch chan<- StreamEv
 					if !ok {
 						break
 					}
+					if injected.Resolve != nil {
+						injected, ok = injected.Resolve()
+						if !ok {
+							continue
+						}
+					}
 					text := injectedMessageText(injected)
 					if text != "" || (cfg.SupportsImageInput && len(injected.ImageParts) > 0) {
 						var extra []sdk.MessagePart
@@ -423,7 +429,7 @@ func (a *Agent) runStream(ctx context.Context, cfg RunConfig, ch chan<- StreamEv
 						messageIndex := len(p.Messages)
 						p.Messages = append(p.Messages, sdk.UserMessage(text, extra...))
 						cfg.ContextMutations.Record(contextfrag.MutationInjectedMessage, fmt.Sprintf("bytes=%d", len(text)))
-						injectedMessages.record(step, messageIndex, text)
+						injectedMessages.record(step, messageIndex, text, injected.Applied)
 						a.logger.Info("injected user message into agent stream",
 							slog.String("bot_id", cfg.Identity.BotID),
 							slog.Int("after_step", step-1),
@@ -472,6 +478,7 @@ func (a *Agent) runStream(ctx context.Context, cfg RunConfig, ch chan<- StreamEv
 				return err
 			}
 		}
+		injectedMessages.acknowledgeCommitted(stepIndex)
 		nextDurableStep = stepIndex + 1
 		return nil
 	}
@@ -1144,15 +1151,15 @@ func (a *Agent) buildGenerateOptions(ctx context.Context, cfg RunConfig, tools [
 			if p == nil {
 				return nil
 			}
-			p.Messages = removeBackgroundSummaryMessages(p.Messages, initialProviderMessageCount)
 			if basePrepare != nil {
 				if override := basePrepare(p); override != nil {
 					p = override
 				}
 			}
-			if summary := strings.TrimSpace(cfg.BackgroundManager.RunningTasksSummary(cfg.Identity.BotID, cfg.Identity.SessionID)); summary != "" {
+			summary := strings.TrimSpace(cfg.BackgroundManager.RunningTasksSummary(cfg.Identity.BotID, cfg.Identity.SessionID))
+			if updated := appendBackgroundSummaryUpdate(p.Messages, initialProviderMessageCount, summary); len(updated) != len(p.Messages) {
 				cfg.ContextMutations.Record(contextfrag.MutationBackgroundSummary, fmt.Sprintf("bytes=%d", len(summary)))
-				p.Messages = append(p.Messages, backgroundSummaryMessage(summary))
+				p.Messages = updated
 			}
 			return p
 		}
@@ -1436,6 +1443,15 @@ func recordContextCacheUsage(ledger *contextfrag.MutationLedger, stepIndex int, 
 		return
 	}
 	detail := step.Usage.InputTokenDetails
+	// Chat Completions providers can report cached input without the detailed
+	// non-cached counter. Derive the missing remainder from total input, while
+	// preserving Anthropic's explicit read/write accounting.
+	if detail.CacheReadTokens == 0 {
+		detail.CacheReadTokens = step.Usage.CachedInputTokens
+	}
+	if detail.NoCacheTokens == 0 && detail.CacheWriteTokens == 0 && detail.CacheWrite5mTokens == 0 && detail.CacheWrite1hTokens == 0 {
+		detail.NoCacheTokens = max(0, step.Usage.InputTokens-detail.CacheReadTokens)
+	}
 	if step.Usage.CachedInputTokens == 0 && detail.NoCacheTokens == 0 && detail.CacheReadTokens == 0 &&
 		detail.CacheWriteTokens == 0 && detail.CacheWrite5mTokens == 0 && detail.CacheWrite1hTokens == 0 {
 		return
@@ -1739,27 +1755,27 @@ func backgroundSummaryMessage(summary string) sdk.Message {
 	return sdk.UserMessage(contextfrag.BackgroundSummaryMessagePrefix + summary)
 }
 
-// removeBackgroundSummaryMessages strips summary carrier messages appended by
-// earlier steps so each step rebuilds exactly one fresh summary. keepPrefix
-// guards the compiled initial context: only loop-appended messages match.
-func removeBackgroundSummaryMessages(messages []sdk.Message, keepPrefix int) []sdk.Message {
-	if keepPrefix < 0 {
-		keepPrefix = 0
-	}
-	for i := keepPrefix; i < len(messages); i++ {
-		if !contextfrag.IsBackgroundSummaryCarrier(messages[i]) {
-			continue
+// Append status transitions without moving or replacing messages already seen
+// by the provider. A final empty state explicitly supersedes earlier updates.
+func appendBackgroundSummaryUpdate(messages []sdk.Message, keepPrefix int, summary string) []sdk.Message {
+	var previous string
+	for i := len(messages) - 1; i >= max(keepPrefix, 0); i-- {
+		if contextfrag.IsBackgroundSummaryCarrier(messages[i]) {
+			previous = messages[i].Content[0].(sdk.TextPart).Text
+			break
 		}
-		out := make([]sdk.Message, 0, len(messages)-1)
-		out = append(out, messages[:i]...)
-		for _, msg := range messages[i+1:] {
-			if !contextfrag.IsBackgroundSummaryCarrier(msg) {
-				out = append(out, msg)
-			}
-		}
-		return out
 	}
-	return messages
+	if summary == "" {
+		if previous == "" {
+			return messages
+		}
+		summary = "No background tasks are currently running. This supersedes earlier background status updates."
+	}
+	next := backgroundSummaryMessage(summary)
+	if previous == next.Content[0].(sdk.TextPart).Text {
+		return messages
+	}
+	return append(messages, next)
 }
 
 // injectedMessageText prefers the headerified rendering; when it falls back to

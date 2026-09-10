@@ -27,6 +27,12 @@ func SelectProviderStepMessages(ctx context.Context, input agentpkg.ContextStepS
 	if input.InitialMessageCount < 0 || input.InitialMessageCount >= len(input.Messages) {
 		return agentpkg.ContextStepSelectionResult{}
 	}
+	// Keep the admitted request append-only while it fits comfortably. Rewriting
+	// an old tool result invalidates the provider cache for everything after it.
+	// Like deepseek-harness, enter pruning only at a context pressure boundary.
+	if !providerStepUnderPressure(input) {
+		return agentpkg.ContextStepSelectionResult{}
+	}
 	loopMessages := input.Messages[input.InitialMessageCount:]
 	if len(loopMessages) == 0 {
 		return agentpkg.ContextStepSelectionResult{}
@@ -46,13 +52,15 @@ func SelectProviderStepMessages(ctx context.Context, input agentpkg.ContextStepS
 	frags = markInjectedLoopUserFrags(frags)
 
 	selector := &FragmentSelector{}
+	profile := selector.ProfileFor(contextfrag.IntentRunConfigPreProvider)
+	profile.ProtectRecentTailOnly = true
 	budget := input.BudgetMaxTokens
 	for attempt := 0; attempt <= len(frags)+1; attempt++ {
 		attemptInput := input
 		attemptInput.BudgetMaxTokens = budget
 		selection := selector.Select(
 			frags,
-			selector.ProfileFor(contextfrag.IntentRunConfigPreProvider),
+			profile,
 			providerStepBudgetEnvelope(attemptInput),
 		)
 		if selection.FatalError != nil {
@@ -105,6 +113,20 @@ func SelectProviderStepMessages(ctx context.Context, input agentpkg.ContextStepS
 	)}
 }
 
+func providerStepUnderPressure(input agentpkg.ContextStepSelectionInput) bool {
+	allowance := input.ProviderInputAllowanceTokens
+	tokens := 0
+	if allowance > 0 {
+		tokens = contextfrag.ProviderEnvelopeTokens(input.ProviderSystem, input.Messages, input.ProviderTools)
+	} else {
+		allowance = input.BudgetMaxTokens
+		tokens = contextfrag.ProviderEnvelopeTokens("", input.Messages[input.InitialMessageCount:], nil)
+	}
+	// No known capacity means there is no measured pressure. Do not manufacture
+	// cache breaks just because the tool loop has reached a message-count limit.
+	return allowance > 0 && tokens >= allowance-allowance/5
+}
+
 func providerStepEnvelopeOverflow(input agentpkg.ContextStepSelectionInput, messages []sdk.Message) int {
 	if input.ProviderInputAllowanceTokens <= 0 {
 		return 0
@@ -113,12 +135,13 @@ func providerStepEnvelopeOverflow(input agentpkg.ContextStepSelectionInput, mess
 }
 
 // markInjectedLoopUserFrags types user-role messages appended during the tool
-// loop. Text-only carriers (InjectCh text, background summaries) hold content
-// the run deliberately inserted mid-stream, so step budget pressure must never
-// drop them. Media-bearing payloads (read_media injections) stay droppable:
+// loop. InjectCh text and the latest background snapshot remain protected.
+// Superseded background snapshots can yield under pressure. Media-bearing
+// payloads (read_media injections) stay droppable:
 // their sources live at workspace paths the model can re-read.
 func markInjectedLoopUserFrags(frags []contextfrag.ContextFrag) []contextfrag.ContextFrag {
-	for i := range frags {
+	latestBackground := true
+	for i := len(frags) - 1; i >= 0; i-- {
 		msg := providerStepFragMessage(frags[i])
 		if msg == nil || !isRole(msg.Role, sdk.MessageRoleUser) {
 			continue
@@ -129,6 +152,10 @@ func markInjectedLoopUserFrags(frags []contextfrag.ContextFrag) []contextfrag.Co
 		}
 		if contextfrag.IsBackgroundSummaryCarrier(*msg) {
 			frags[i].Kind = contextfrag.KindBackgroundSummary
+			if !latestBackground {
+				continue
+			}
+			latestBackground = false
 		} else {
 			frags[i].Kind = contextfrag.KindInjectedMessage
 		}

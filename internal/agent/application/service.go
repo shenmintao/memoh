@@ -631,19 +631,41 @@ func (s *Service) resolveWithHTTPClient(ctx context.Context, req ChatRequest, mo
 	if req.InjectCh != nil {
 		agentInjectCh := make(chan native.InjectMessage, cap(req.InjectCh))
 		go func() {
-			for msg := range req.InjectCh {
+			defer close(agentInjectCh)
+			for {
+				var msg turnpkg.InjectMessage
+				var ok bool
+				select {
+				case <-ctx.Done():
+					return
+				case msg, ok = <-req.InjectCh:
+					if !ok {
+						return
+					}
+				}
 				agentMsg := native.InjectMessage{
 					Text:            msg.Text,
+					Applied:         msg.Applied,
 					HeaderifiedText: msg.HeaderifiedText,
+				}
+				if msg.Resolve != nil {
+					resolver := msg.Resolve
+					agentMsg.Resolve = func() (native.InjectMessage, bool) {
+						resolved, available := resolver()
+						return native.InjectMessage{Text: resolved.Text, HeaderifiedText: resolved.HeaderifiedText, Applied: resolved.Applied}, available
+					}
 				}
 				// Inline any image attachments from the injected message so the
 				// model receives them as vision input alongside the text.
 				if runCfg.SupportsImageInput && len(msg.Attachments) > 0 {
 					agentMsg.ImageParts = s.inlineInjectAttachments(ctx, req.BotID, msg.Attachments)
 				}
-				agentInjectCh <- agentMsg
+				select {
+				case agentInjectCh <- agentMsg:
+				case <-ctx.Done():
+					return
+				}
 			}
-			close(agentInjectCh)
 		}()
 		runCfg.InjectCh = agentInjectCh
 

@@ -148,20 +148,18 @@ func TestAlwaysOnModelIsSupportedWithoutAControl(t *testing.T) {
 func TestOptionsForAppliesTheSameWirePolicyAsResolve(t *testing.T) {
 	t.Parallel()
 
-	// Generic OpenAI clients take xhigh as the ceiling. If the picker offered max
-	// while the resolver filtered it, a user could select a tier that silently
-	// became something else — the class of drift this package prevents.
+	// Explicitly advertised max must reach both the picker and the resolver.
 	const advertisedMax = EffortMax
 	advertised := []string{EffortLow, EffortHigh, advertisedMax}
 
 	opts := OptionsFor(ModeToggle, advertised, "openai-completions", "")
-	if slices.Contains(opts.Efforts, advertisedMax) {
-		t.Fatalf("max should be filtered for generic OpenAI clients: %v", opts.Efforts)
+	if !slices.Contains(opts.Efforts, advertisedMax) {
+		t.Fatalf("declared max should be selectable: %v", opts.Efforts)
 	}
 
 	cfg := ResolveConfig(ModeToggle, advertised, opts, advertisedMax, "", "openai-completions")
-	if cfg == nil || cfg.Effort == advertisedMax {
-		t.Fatalf("resolver should not send a filtered tier, got %+v", cfg)
+	if cfg == nil || cfg.Effort != advertisedMax {
+		t.Fatalf("resolver should preserve declared max, got %+v", cfg)
 	}
 
 	// Codex keeps max, and both answers must agree about that too.

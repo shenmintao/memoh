@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -459,7 +460,7 @@ func TestE2E_RunningTasksSummaryInjected(t *testing.T) {
 
 	bgMgr := background.New(nil)
 
-	var step3Params sdk.GenerateParams
+	var step2Params, step3Params sdk.GenerateParams
 	modelProvider := &agentReadMediaMockProvider{
 		handler: func(call int, params sdk.GenerateParams) (*sdk.GenerateResult, error) {
 			switch call {
@@ -478,6 +479,7 @@ func TestE2E_RunningTasksSummaryInjected(t *testing.T) {
 				}, nil
 			case 2:
 				// Do another tool call so prepareStep fires again.
+				step2Params = cloneGenerateParams(params)
 				return &sdk.GenerateResult{
 					FinishReason: sdk.FinishReasonToolCalls,
 					ToolCalls: []sdk.ToolCall{{
@@ -528,10 +530,13 @@ func TestE2E_RunningTasksSummaryInjected(t *testing.T) {
 	if got := backgroundSummaryCount(step3Params.Messages); got != 1 {
 		t.Fatalf("summary messages = %d, want exactly 1", got)
 	}
-	last := step3Params.Messages[len(step3Params.Messages)-1]
+	if len(step3Params.Messages) <= len(step2Params.Messages) || !reflect.DeepEqual(step2Params.Messages, step3Params.Messages[:len(step2Params.Messages)]) {
+		t.Fatal("unchanged background state must preserve the previous request prefix")
+	}
+	last := step2Params.Messages[len(step2Params.Messages)-1]
 	text, _ := last.Content[0].(sdk.TextPart)
 	if last.Role != sdk.MessageRoleUser || !strings.Contains(text.Text, "Long running task") {
-		t.Errorf("expected tail user message carrying the task summary, got: %#v", last)
+		t.Errorf("expected the original user message carrying the task summary, got: %#v", last)
 	}
 }
 

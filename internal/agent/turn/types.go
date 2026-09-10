@@ -163,7 +163,11 @@ type InjectMessage struct {
 	Text            string
 	Attachments     []Attachment
 	HeaderifiedText string
+	ID              string
 	Applied         func()
+	Rejected        func(string)
+	// Resolve collects a queued batch only when the runtime accepts the token.
+	Resolve func() (InjectMessage, bool)
 }
 
 // ModelMessage is the canonical message format exchanged at the turn boundary.

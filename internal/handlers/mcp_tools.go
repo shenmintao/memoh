@@ -72,17 +72,30 @@ func (h *ContainerdHandler) handleMCPToolsWithBotID(c echo.Context, botID string
 	// the bot in the path must own the runtime. Fails closed: a dead or
 	// foreign runtime never falls back to header-supplied identity.
 	if runtimeID := strings.TrimSpace(c.Request().Header.Get(mcpgw.ToolHeaderRuntimeID)); runtimeID != "" {
-		if h.acpRuntimes == nil {
-			return echo.NewHTTPError(http.StatusNotFound, "runtime not found")
-		}
-		session, ok := h.acpRuntimes.ResolveRuntimeToolContext(botID, runtimeID, c.Request().Header.Get(mcpgw.ToolHeaderRuntimeToken))
-		if !ok {
-			return echo.NewHTTPError(http.StatusNotFound, "runtime not found")
-		}
-		mcpgw.ServeToolMCPHTTP(c.Response().Writer, c.Request(), h.logger, h.toolGateway, h.toolContexts, session)
-		return nil
+		return h.serveRuntimeMCPTools(c, botID)
 	}
 	session := h.buildToolSessionContext(c, botID)
+	mcpgw.ServeToolMCPHTTP(c.Response().Writer, c.Request(), h.logger, h.toolGateway, h.toolContexts, session)
+	return nil
+}
+
+// HandleRuntimeMCPTools authenticates ACP requests using the live runtime's
+// scoped token. This dedicated route does not require an account JWT and must
+// never fall back to header-supplied identity or the public tool context.
+func (h *ContainerdHandler) HandleRuntimeMCPTools(c echo.Context) error {
+	return h.serveRuntimeMCPTools(c, strings.TrimSpace(c.Param("bot_id")))
+}
+
+func (h *ContainerdHandler) serveRuntimeMCPTools(c echo.Context, botID string) error {
+	runtimeID := strings.TrimSpace(c.Request().Header.Get(mcpgw.ToolHeaderRuntimeID))
+	token := strings.TrimSpace(c.Request().Header.Get(mcpgw.ToolHeaderRuntimeToken))
+	if botID == "" || runtimeID == "" || token == "" || h.acpRuntimes == nil {
+		return echo.NewHTTPError(http.StatusNotFound, "runtime not found")
+	}
+	session, ok := h.acpRuntimes.ResolveRuntimeToolContext(botID, runtimeID, token)
+	if !ok || session.BotID != botID || session.RuntimeID != runtimeID {
+		return echo.NewHTTPError(http.StatusNotFound, "runtime not found")
+	}
 	mcpgw.ServeToolMCPHTTP(c.Response().Writer, c.Request(), h.logger, h.toolGateway, h.toolContexts, session)
 	return nil
 }

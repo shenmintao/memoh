@@ -18692,6 +18692,11 @@ const docTemplate = `{
                         "system"
                     ]
                 },
+                "run_id": {
+                    "description": "A running task can contain several user turns after supplements.",
+                    "type": "string",
+                    "format": "uuid"
+                },
                 "sender_avatar_url": {
                     "type": "string"
                 },

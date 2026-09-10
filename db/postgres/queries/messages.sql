@@ -2033,6 +2033,7 @@ SELECT
   m.content,
   m.metadata,
   m.turn_id,
+  m.run_id,
   m.turn_position,
   m.display_text,
   m.created_at,

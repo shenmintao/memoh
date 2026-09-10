@@ -254,6 +254,7 @@ func ConvertMessagesToUITurns(messages []messagepkg.Message) []UITurn {
 				completeBackgroundTool(task)
 				result = append(result, UITurn{
 					TurnID:         strings.TrimSpace(raw.TurnID),
+					RunID:          strings.TrimSpace(raw.RunID),
 					TurnPosition:   raw.TurnPosition,
 					Role:           "system",
 					Kind:           "background_task",
@@ -282,6 +283,7 @@ func ConvertMessagesToUITurns(messages []messagepkg.Message) []UITurn {
 
 			turn := UITurn{
 				TurnID:            strings.TrimSpace(raw.TurnID),
+				RunID:             strings.TrimSpace(raw.RunID),
 				TurnPosition:      raw.TurnPosition,
 				Role:              "user",
 				Text:              text,
@@ -382,6 +384,7 @@ func newPendingAssistantTurn(raw messagepkg.Message) *uiPendingAssistantTurn {
 	return &uiPendingAssistantTurn{
 		Turn: UITurn{
 			TurnID:            strings.TrimSpace(raw.TurnID),
+			RunID:             strings.TrimSpace(raw.RunID),
 			TurnPosition:      raw.TurnPosition,
 			Role:              "assistant",
 			Timestamp:         raw.CreatedAt,

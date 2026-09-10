@@ -113,6 +113,8 @@ type ContextStepReselector func(context.Context, ContextStepSelectionInput) Cont
 // InjectMessage carries a user message to be injected into a running agent
 // stream between tool rounds via the PrepareStep hook.
 type InjectMessage struct {
+	Resolve         func() (InjectMessage, bool)
+	Applied         func()
 	Text            string
 	HeaderifiedText string
 	// ImageParts carries inline images (data URL or public URL) to attach

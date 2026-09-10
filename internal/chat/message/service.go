@@ -1,6 +1,7 @@
 package message
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -490,6 +491,16 @@ func (s *DBService) preparePersistMessage(ctx context.Context, input PersistInpu
 		return preparedPersistMessage{}, fmt.Errorf("marshal message metadata: %w", err)
 	}
 
+	safeMetadata := postgresMessageJSON(metaBytes)
+	if !bytes.Equal(safeMetadata, metaBytes) {
+		// Keep returned message metadata consistent with its database projection.
+		metadata = nil
+		if err := json.Unmarshal(safeMetadata, &metadata); err != nil {
+			return preparedPersistMessage{}, fmt.Errorf("normalize message metadata: %w", err)
+		}
+		metaBytes = safeMetadata
+	}
+
 	content := input.Content
 	if len(content) == 0 {
 		content = []byte("{}")
@@ -505,14 +516,14 @@ func (s *DBService) preparePersistMessage(ctx context.Context, input PersistInpu
 			ExternalMessageID:       toPgText(input.ExternalMessageID),
 			SourceReplyToMessageID:  toPgText(input.SourceReplyToMessageID),
 			Role:                    input.Role,
-			Content:                 content,
+			Content:                 postgresMessageJSON(content),
 			Metadata:                metaBytes,
-			Usage:                   input.Usage,
+			Usage:                   postgresMessageJSON(input.Usage),
 			SessionMode:             sessionMode,
 			RuntimeType:             runtimeType,
 			ModelID:                 pgModelID,
 			EventID:                 pgEventID,
-			DisplayText:             toPgText(input.DisplayText),
+			DisplayText:             toPgText(strings.ReplaceAll(input.DisplayText, "\x00", "␀")),
 			RunID:                   pgRunID,
 		},
 		metadata:     metadata,
@@ -1954,6 +1965,7 @@ func toMessageFromLatestUIBySessionRow(row sqlc.ListMessagesLatestUIBySessionRow
 		false,
 	)
 	message.TurnID = uuidString(row.TurnID)
+	message.RunID = uuidString(row.RunID)
 	message.TurnPosition = int8Ptr(row.TurnPosition)
 	return message
 }

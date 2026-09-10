@@ -8,3 +8,4 @@ const destination = resolve(packageRoot, 'dist/bridge.proto')
 
 await mkdir(dirname(destination), { recursive: true })
 await copyFile(source, destination)
+await copyFile(resolve(packageRoot, 'src/capabilities.proto'), resolve(packageRoot, 'dist/capabilities.proto'))

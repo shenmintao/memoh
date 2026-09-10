@@ -289,6 +289,12 @@ func (m *acpToolEventMapper) setPromptActive(active bool) {
 func (m *acpToolEventMapper) eventsFromNotification(n acp.SessionNotification) []event.StreamEvent {
 	update := n.Update
 	switch {
+	case update.UserMessageChunk != nil:
+		text := contentText(update.UserMessageChunk.Content)
+		if text == "" {
+			return nil
+		}
+		return []event.StreamEvent{{Type: event.InjectedUserMessage, Delta: text}}
 	case update.AgentMessageChunk != nil:
 		text := contentText(update.AgentMessageChunk.Content)
 		if text == "" {

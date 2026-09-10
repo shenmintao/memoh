@@ -296,16 +296,16 @@ func TestStepReselectionBackgroundSummaryDoesNotShiftRecentAnchor(t *testing.T) 
 		Scope:               contextfrag.Scope{BotID: "bot-1"},
 		InitialMessageCount: len(prefix),
 		Messages:            messages,
-		// The injected request, its following tool work, the background
-		// summary, and the trim notice are protected; older cycles must yield.
+		// Instructions, the newest tool closure, and the background summary
+		// are protected. Completed work yields oldest-first under pressure.
 		BudgetMaxTokens: 700,
 	})
 	if selection.Messages == nil || selection.Dropped == 0 {
 		t.Fatalf("budget pressure must drop loop span content: %+v", selection)
 	}
-	for _, callID := range []string{"call-c", "call-d"} {
+	for _, callID := range []string{"call-d"} {
 		if !selectionHasToolResult(selection.Messages, callID) {
-			t.Fatalf("tool work after the injected request must stay protected, lost %s", callID)
+			t.Fatalf("newest tool work must stay protected, lost %s", callID)
 		}
 	}
 	if !selectionHasUserText(selection.Messages, "[Background tasks]") {

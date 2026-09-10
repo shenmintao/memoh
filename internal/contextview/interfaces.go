@@ -54,8 +54,11 @@ type SelectionResult struct {
 }
 
 type IntentProfile struct {
-	Intent        contextfrag.Intent
-	MustKeepSlots []contextfrag.Slot
+	// ProtectRecentTailOnly is used for active tool loops. Injected instructions
+	// remain must-keep, but do not pin every subsequent completed tool cycle.
+	ProtectRecentTailOnly bool
+	Intent                contextfrag.Intent
+	MustKeepSlots         []contextfrag.Slot
 	// MustKeepFrag evaluates retention that depends on fragment policy rather
 	// than provider placement alone.
 	MustKeepFrag func(contextfrag.ContextFrag) bool

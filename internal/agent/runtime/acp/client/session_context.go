@@ -1,6 +1,7 @@
 package client
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -10,11 +11,11 @@ import (
 const HermesContainerHome = dataMountPath + "/.memoh-hermes"
 
 type SessionContextInput struct {
-	AgentID      string
-	SetupMode    SetupMode
-	Backend      string
+	AgentID       string
+	SetupMode     SetupMode
+	Backend       string
 	WorkspaceRoot string
-	ProjectPath  string
+	ProjectPath   string
 }
 
 type ResolvedSessionContext struct {
@@ -47,7 +48,7 @@ func ResolveSessionContext(input SessionContextInput) (ResolvedSessionContext, e
 			projectPath = resolvedRoot
 		}
 		if resolvedRoot == "" || projectPath == "" {
-			return ResolvedSessionContext{}, fmt.Errorf("remote workspace paths are incomplete")
+			return ResolvedSessionContext{}, errors.New("remote workspace paths are incomplete")
 		}
 	default:
 		return ResolvedSessionContext{}, fmt.Errorf("unsupported workspace backend %q", input.Backend)

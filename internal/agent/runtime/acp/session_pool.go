@@ -28,9 +28,11 @@ import (
 	acpprofile "github.com/felinics/memoh/internal/agent/runtime/acp/profile"
 	sessionruntime "github.com/felinics/memoh/internal/agent/runtime/session"
 	"github.com/felinics/memoh/internal/agent/sessionmode"
+	"github.com/felinics/memoh/internal/agent/turn"
 	"github.com/felinics/memoh/internal/bots"
 	"github.com/felinics/memoh/internal/mcp"
 	"github.com/felinics/memoh/internal/runtimefence"
+	"github.com/felinics/memoh/internal/workspace"
 	"github.com/felinics/memoh/internal/workspace/bridge"
 )
 
@@ -144,11 +146,12 @@ type botGetter interface {
 // SessionDescriptor contains the minimal persisted session metadata required
 // to launch an ACP runtime. The Chat domain supplies it through an adapter.
 type SessionDescriptor struct {
-	BotID           string
-	SessionType     string
-	Metadata        map[string]any
-	RuntimeMetadata map[string]any
-	IsACP           bool
+	WorkspaceTargetID string
+	BotID             string
+	SessionType       string
+	Metadata          map[string]any
+	RuntimeMetadata   map[string]any
+	IsACP             bool
 }
 
 // SessionDescriptorReader resolves runtime metadata without exposing Chat
@@ -217,6 +220,7 @@ type runtimeHandle struct {
 // session. Session metadata (agent, project path) is resolved from the
 // session store when available.
 type PromptInput struct {
+	InjectCh                 <-chan turn.InjectMessage
 	BotID                    string
 	ChatID                   string
 	SessionID                string
@@ -950,6 +954,7 @@ func (p *SessionPool) promptOnHandle(ctx context.Context, h *runtimeHandle, inpu
 
 	resources := promptResources(input)
 	options := client.PromptOptions{
+		InjectCh:          input.InjectCh,
 		ToolOutputLimit:   input.ToolOutputLimit,
 		Images:            input.Images,
 		AllowResourceOnly: len(input.AttachmentReferences) > 0 && len(resources) > 0,
@@ -1547,12 +1552,24 @@ type startOptions struct {
 //
 //nolint:contextcheck // startup failure cleanup uses the handle owner context.
 func (p *SessionPool) startRuntime(ctx context.Context, h *runtimeHandle, opts startOptions) error {
+	if p.store != nil && h.boundSession != "" {
+		descriptor, err := p.store.Get(ctx, h.boundSession)
+		if err != nil {
+			_ = p.teardown(h)
+			return err
+		}
+		if descriptor.BotID != h.botID {
+			_ = p.teardown(h)
+			return errors.New("ACP session workspace does not belong to bot")
+		}
+		if descriptor.WorkspaceTargetID != "" {
+			ctx = workspace.WithWorkspaceTarget(ctx, descriptor.WorkspaceTargetID)
+		}
+	}
 	startCtx, cancelStart := context.WithCancel(ctx)
 	defer cancelStart()
 	h.state.Lock()
-	if h.ownerCtx == nil {
-		h.ownerCtx = context.WithoutCancel(ctx)
-	}
+	h.ownerCtx = context.WithoutCancel(ctx)
 	if h.closed {
 		h.state.Unlock()
 		return errors.New("ACP runtime was closed during startup")

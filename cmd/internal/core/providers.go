@@ -66,6 +66,7 @@ import (
 	"github.com/felinics/memoh/internal/logger"
 	"github.com/felinics/memoh/internal/mcp"
 	mcpfederation "github.com/felinics/memoh/internal/mcp/sources/federation"
+	"github.com/felinics/memoh/internal/mcp/sources/runtimecap"
 	"github.com/felinics/memoh/internal/media"
 	memprovider "github.com/felinics/memoh/internal/memory/adapters"
 	membuiltin "github.com/felinics/memoh/internal/memory/adapters/builtin"
@@ -539,8 +540,8 @@ func provideACPRunner(log *slog.Logger, manager *workspace.Manager) *acpclient.R
 	return acpclient.NewRunner(log, manager)
 }
 
-func provideACPSessionPool(lc fx.Lifecycle, log *slog.Logger, runner *acpclient.Runner, botService *bots.Service, sessionService *sessionpkg.Service, queries dbstore.Queries, toolGateway *mcp.ToolGatewayService, toolContexts *mcp.ToolSessionContextStore, toolApproval *toolapproval.Service, userInput *userinput.Service, containerdHandler *handlers.ContainerdHandler, sessionRuntime *sessionruntime.Manager) *acpagent.SessionPool {
-	pool := acpagent.NewSessionPool(log, runner, botService, acpsessionadapter.NewSource(sessionService))
+func provideACPSessionPool(lc fx.Lifecycle, log *slog.Logger, runner *acpclient.Runner, botService *bots.Service, sessionService *sessionpkg.Service, queries dbstore.Queries, toolGateway *mcp.ToolGatewayService, toolContexts *mcp.ToolSessionContextStore, toolApproval *toolapproval.Service, userInput *userinput.Service, containerdHandler *handlers.ContainerdHandler, sessionRuntime *sessionruntime.Manager, workdirs *workdir.Service) *acpagent.SessionPool {
+	pool := acpagent.NewSessionPool(log, runner, botService, acpsessionadapter.NewSource(sessionService, workdirs))
 	pool.SetSessionRuntime(sessionRuntime)
 	pool.SetSessionStateStore(acpsessionadapter.NewStateStore(queries))
 	pool.SetToolGateway(toolGateway)
@@ -681,11 +682,11 @@ func injectACPToolProviders(source *agenttools.NativeToolSource, toolProviders [
 	}
 }
 
-func provideToolGatewayService(log *slog.Logger, fedGateway *handlers.MCPFederationGateway, oauthService *mcp.OAuthService, mcpConnService *mcp.ConnectionService, connectorSource *connectors.Source, containerdHandler *handlers.ContainerdHandler, nativeSource *agenttools.NativeToolSource, toolContexts *mcp.ToolSessionContextStore, cfg config.Config) *mcp.ToolGatewayService {
+func provideToolGatewayService(log *slog.Logger, fedGateway *handlers.MCPFederationGateway, oauthService *mcp.OAuthService, mcpConnService *mcp.ConnectionService, connectorSource *connectors.Source, containerdHandler *handlers.ContainerdHandler, nativeSource *agenttools.NativeToolSource, toolContexts *mcp.ToolSessionContextStore, manager *workspace.Manager, approvals *toolapproval.Service, cfg config.Config) *mcp.ToolGatewayService {
 	fedGateway.SetOAuthService(oauthService)
 	fedSource := mcpfederation.NewSource(log, fedGateway, mcpConnService, mcpfederation.WithReservedToolName(agenttools.IsBuiltInToolName))
 	limits := agentLimitsFromConfig(cfg.Agent)
-	svc := mcp.NewToolGatewayService(log, []mcp.ToolSource{nativeSource, connectorSource, fedSource}, mcp.WithToolOutputLimit(limits.ToolOutputLimit()))
+	svc := mcp.NewToolGatewayService(log, []mcp.ToolSource{nativeSource, connectorSource, fedSource, runtimecap.NewSource(log, manager, approvals, toolContexts)}, mcp.WithToolOutputLimit(limits.ToolOutputLimit()))
 	containerdHandler.SetToolGatewayService(svc)
 	containerdHandler.SetToolSessionContextStore(toolContexts)
 	return svc
@@ -739,6 +740,9 @@ func provideToolProviders(log *slog.Logger, channelRuntime channel.Runtime, regi
 		agenttools.NewVideoGenProvider(log, settingsService, videoService, bgManager, manager, config.DefaultDataMount),
 		agenttools.NewFederationProvider(log, connectorSource),
 		agenttools.NewFederationProvider(log, fedSource),
+		// Native calls use the framework's deferred approval handler. The ACP
+		// gateway source uses RunFlow because it executes outside that handler.
+		agenttools.NewFederationProvider(log, runtimecap.NewSource(log, manager, nil, nil)),
 		agenttools.NewHistoryProvider(log, historySessions, messageService, queries),
 	}
 }

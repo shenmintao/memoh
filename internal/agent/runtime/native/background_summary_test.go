@@ -3,6 +3,7 @@ package native
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -80,9 +81,9 @@ func TestInjectedMessageTextGuardsReservedPrefix(t *testing.T) {
 	if contextfrag.IsBackgroundSummaryCarrier(injected) {
 		t.Fatal("guarded injection must not classify as a background summary carrier")
 	}
-	kept := removeBackgroundSummaryMessages([]sdk.Message{sdk.UserMessage("start"), injected}, 1)
-	if len(kept) != 2 {
-		t.Fatalf("next step removed the guarded injection: %d messages left, want 2", len(kept))
+	kept := appendBackgroundSummaryUpdate([]sdk.Message{sdk.UserMessage("start"), injected}, 1, "task running")
+	if len(kept) != 3 || !reflect.DeepEqual(kept[1], injected) {
+		t.Fatal("background update did not preserve the guarded user injection")
 	}
 }
 
@@ -159,7 +160,7 @@ func TestAgentGenerateBackgroundSummaryMessageRoundtrip(t *testing.T) {
 		if got := backgroundSummaryCount(messages); got != 1 {
 			t.Fatalf("call %d summary messages = %d, want exactly 1 (no accumulation)", call+1, got)
 		}
-		last := messages[len(messages)-1]
+		last := calls[1].Messages[len(calls[1].Messages)-1]
 		if last.Role != sdk.MessageRoleUser {
 			t.Fatalf("call %d last message role = %q, want summary as tail user message", call+1, last.Role)
 		}
@@ -168,8 +169,18 @@ func TestAgentGenerateBackgroundSummaryMessageRoundtrip(t *testing.T) {
 			t.Fatalf("call %d tail message is not the background summary: %q", call+1, text.Text)
 		}
 	}
-	if got := backgroundSummaryCount(calls[3].Messages); got != 0 {
-		t.Fatalf("call 4 summary messages = %d, want 0 after task completion", got)
+	if got := backgroundSummaryCount(calls[3].Messages); got != 2 {
+		t.Fatalf("call 4 summary messages = %d, want initial status plus completion update", got)
+	}
+	for i := 1; i < len(calls); i++ {
+		previous := calls[i-1].Messages
+		if !reflect.DeepEqual(previous, calls[i].Messages[:len(previous)]) {
+			t.Fatalf("call %d rewrote a previously admitted message", i+1)
+		}
+	}
+	last := calls[3].Messages[len(calls[3].Messages)-1].Content[0].(sdk.TextPart).Text
+	if !strings.Contains(last, "No background tasks are currently running") {
+		t.Fatal("completed status did not supersede the earlier snapshot")
 	}
 	for _, record := range ledger.Records() {
 		if record.Kind == contextfrag.MutationBackgroundSummary {

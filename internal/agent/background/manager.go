@@ -707,7 +707,7 @@ func (m *Manager) RunningTasksSummary(botID, sessionID string) string {
 		if desc == "" {
 			desc = truncate(command, 80)
 		}
-		line := fmt.Sprintf("- [%s] %s (started %s ago", id, desc, time.Since(startedAt).Round(time.Second))
+		line := fmt.Sprintf("- [%s] %s (started at %s", id, desc, startedAt.UTC().Format(time.RFC3339))
 		if outputFile != "" {
 			line += fmt.Sprintf(", output: %s", outputFile)
 		}
@@ -716,6 +716,7 @@ func (m *Manager) RunningTasksSummary(botID, sessionID string) string {
 	if len(lines) == 0 {
 		return ""
 	}
+	sort.Strings(lines)
 	return "Currently running background tasks:\n" + joinLines(lines) + "Use wait_until(task_id) to wait for a task, then get_background_status(task_id) to inspect its result.\n"
 }
 

@@ -929,7 +929,9 @@ type wsClientMessage struct {
 	// reconnecting to a different server — is answered with the first attempt's
 	// outcome instead of executing a second control, and the ack it receives
 	// carries this id back so it can be matched to the request that caused it.
-	ControlID string `json:"control_id,omitempty"`
+	ControlID       string `json:"control_id,omitempty"`
+	PreviousSteerID string `json:"previous_steer_id,omitempty"`
+	QueueSteer      bool   `json:"queue,omitempty"`
 }
 
 type webRequestedSkill struct {
@@ -1436,6 +1438,7 @@ type wsRunAdmissionBuilder func(context.Context, sessionruntime.RunHandle) (sess
 // wsAdmittedTurn is the turn identity a run was admitted with. A zero value
 // means no admission decided the turn, so the history layer allocates one.
 type wsAdmittedTurn struct {
+	InjectCh <-chan turn.InjectMessage
 	TurnID   string
 	Position *int64
 }
@@ -1506,7 +1509,7 @@ type wsRunAdmission struct {
 }
 
 // admitWSTurn turns a submission into a run this process may execute.
-func (h *LocalChannelHandler) admitWSTurn(ctx context.Context, writer *wsWriter, botID string, ref wsTurnRef, submission []byte, admissionBuilder wsRunAdmissionBuilder, abortCh chan struct{}, cancel context.CancelFunc, ownershipCancel context.CancelCauseFunc) (wsRunAdmission, bool) {
+func (h *LocalChannelHandler) admitWSTurn(ctx context.Context, writer *wsWriter, botID string, ref wsTurnRef, submission []byte, admissionBuilder wsRunAdmissionBuilder, abortCh chan struct{}, cancel context.CancelFunc, ownershipCancel context.CancelCauseFunc, injectChannels ...chan turn.InjectMessage) (wsRunAdmission, bool) {
 	if h.sessionRuntime == nil {
 		sendWSError(writer, ref, "session runtime is not configured")
 		return wsRunAdmission{}, false
@@ -1516,6 +1519,10 @@ func (h *LocalChannelHandler) admitWSTurn(ctx context.Context, writer *wsWriter,
 			return sessionruntime.RunAdmissionView{}, nil
 		}
 	}
+	var injectCh chan turn.InjectMessage
+	if len(injectChannels) > 0 {
+		injectCh = injectChannels[0]
+	}
 	admission, err := h.sessionRuntime.Admit(ctx, sessionruntime.AdmitInput{
 		BotID:        botID,
 		SessionID:    ref.SessionID,
@@ -1524,6 +1531,7 @@ func (h *LocalChannelHandler) admitWSTurn(ctx context.Context, writer *wsWriter,
 		Execution: sessionruntime.Execution{
 			Admission: admissionBuilder,
 			AbortCh:   abortCh,
+			InjectCh:  injectCh,
 			Cancel:    cancel,
 			// Revoking ownership cancels the run with a cause, which is what lets
 			// the execution below tell "this run was stopped" apart from "this run
@@ -1674,8 +1682,9 @@ func (h *LocalChannelHandler) startWSStream(baseCtx, connCtx context.Context, wr
 	streamCtx, streamCancelCause := context.WithCancelCause(baseCtx)
 	streamCancel := func() { streamCancelCause(context.Canceled) }
 	abortCh := make(chan struct{}, 1)
+	injectCh := make(chan turn.InjectMessage, 16)
 
-	admission, ok := h.admitWSTurn(streamCtx, writer, botID, ref, submission, admissionBuilder, abortCh, streamCancel, streamCancelCause)
+	admission, ok := h.admitWSTurn(streamCtx, writer, botID, ref, submission, admissionBuilder, abortCh, streamCancel, streamCancelCause, injectCh)
 	if !ok {
 		streamCancel()
 		if onFinish != nil {
@@ -1711,7 +1720,7 @@ func (h *LocalChannelHandler) startWSStream(baseCtx, connCtx context.Context, wr
 				defer onFinish()
 			}
 			defer close(eventCh)
-			return runner(streamCtx, ref, wsAdmittedTurn{TurnID: admission.TurnID, Position: admission.TurnPosition}, eventCh, abortCh)
+			return runner(streamCtx, ref, wsAdmittedTurn{TurnID: admission.TurnID, Position: admission.TurnPosition, InjectCh: injectCh}, eventCh, abortCh)
 		}()
 		// Every event this run produced has to be published before the run is
 		// declared finished, or a subscriber is shown the terminal state and then
@@ -1840,6 +1849,48 @@ func (h *LocalChannelHandler) HandleWebSocket(c echo.Context) error {
 				continue
 			}
 			h.abortWSRun(streamBaseCtx, writer, botID, msg, runID)
+
+		case "steer":
+			ref := wsTurn("", strings.TrimSpace(msg.SessionID)).withRun(strings.TrimSpace(msg.RunID))
+			controlID := strings.TrimSpace(msg.ControlID)
+			controller, ok := h.sessionRuntime.(interface {
+				SteerControl(context.Context, string, string, string, string, string, string) (sessionruntime.SteerState, error)
+			})
+			if !ok || ref.SessionID == "" || ref.RunID == "" || controlID == "" {
+				sendWSControlAck(writer, ref, "steer", controlID, false, "steer_unsupported")
+				continue
+			}
+			if err := h.authorizeWSSession(c.Request().Context(), channelIdentityID, botID, ref.SessionID); err != nil {
+				sendWSControlAck(writer, ref, "steer", controlID, false, "steer_forbidden")
+				continue
+			}
+			if err := h.authorizeWSChatAccess(streamBaseCtx, channelIdentityID, botID); err != nil {
+				sendWSControlAck(writer, ref, "steer", controlID, false, "steer_forbidden")
+				continue
+			}
+			if _, err := h.authorizeWSACPExecution(streamBaseCtx, channelIdentityID, botID, ref.SessionID); err != nil {
+				sendWSControlAck(writer, ref, "steer", controlID, false, "steer_forbidden")
+				continue
+			}
+			var err error
+			if msg.QueueSteer {
+				queueController, supported := h.sessionRuntime.(interface {
+					QueueSteerControl(context.Context, string, string, string, string, string) (sessionruntime.SteerState, error)
+				})
+				if !supported {
+					sendWSControlAck(writer, ref, "steer", controlID, false, "steer_unsupported")
+					continue
+				}
+				_, err = queueController.QueueSteerControl(streamBaseCtx, botID, ref.SessionID, ref.RunID, controlID, msg.Text)
+			} else {
+				_, err = controller.SteerControl(streamBaseCtx, botID, ref.SessionID, ref.RunID, controlID, msg.PreviousSteerID, msg.Text)
+			}
+			code := ""
+			if err != nil {
+				code = "steer_rejected"
+			}
+			// Acceptance is separate from the run.steer applied receipt.
+			sendWSControlAck(writer, ref, "steer", controlID, err == nil, code)
 
 		case "tool_approval_response":
 			sessionID := strings.TrimSpace(msg.SessionID)
@@ -2290,6 +2341,7 @@ func (h *LocalChannelHandler) HandleWebSocket(c echo.Context) error {
 			h.startWSStream(streamBaseCtx, connCtx, writer, botID, ref, "ws stream error", submission, messageAdmission.build, releaseActiveWSTurn,
 				func(ctx context.Context, runRef wsTurnRef, admittedTurn wsAdmittedTurn, eventCh chan<- application.WSStreamEvent, abortCh <-chan struct{}) error {
 					req := application.ChatRequest{
+						InjectCh:                admittedTurn.InjectCh,
 						BotID:                   botID,
 						ChatID:                  botID,
 						ThreadID:                sessionID,

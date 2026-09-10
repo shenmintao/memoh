@@ -31,10 +31,11 @@ func TestStepReselectionTruncatesOldToolResultsKeepsRecent(t *testing.T) {
 	messages := loopSpanWithToolCycles(prefix, 3, 1000)
 
 	selection := SelectProviderStepMessages(context.Background(), agentpkg.ContextStepSelectionInput{
-		Scope:                 contextfrag.Scope{BotID: "bot-1"},
-		InitialMessageCount:   len(prefix),
-		Messages:              messages,
-		KeepRecentToolResults: 1,
+		Scope:                        contextfrag.Scope{BotID: "bot-1"},
+		InitialMessageCount:          len(prefix),
+		Messages:                     messages,
+		KeepRecentToolResults:        1,
+		ProviderInputAllowanceTokens: contextfrag.ProviderEnvelopeTokens("", messages, nil),
 	})
 	if selection.Messages == nil {
 		t.Fatal("truncation must produce a message override")
@@ -78,10 +79,11 @@ func TestStepReselectionTruncationPreservesExactLaterCarrierOrigin(t *testing.T)
 	messages = append(messages, sdk.UserMessage(marker))
 
 	selection := SelectProviderStepMessages(context.Background(), agentpkg.ContextStepSelectionInput{
-		Scope:                 contextfrag.Scope{BotID: "bot-1"},
-		InitialMessageCount:   len(prefix),
-		Messages:              messages,
-		KeepRecentToolResults: 1,
+		Scope:                        contextfrag.Scope{BotID: "bot-1"},
+		InitialMessageCount:          len(prefix),
+		Messages:                     messages,
+		KeepRecentToolResults:        1,
+		ProviderInputAllowanceTokens: contextfrag.ProviderEnvelopeTokens("", messages, nil),
 	})
 	if selection.Messages == nil || selection.Truncated != 2 {
 		t.Fatalf("selection = %+v, want two rewritten tool results", selection)
@@ -133,10 +135,11 @@ func TestStepReselectionSkipsTruncationForSmallResults(t *testing.T) {
 	messages := loopSpanWithToolCycles(prefix, 3, 40)
 
 	selection := SelectProviderStepMessages(context.Background(), agentpkg.ContextStepSelectionInput{
-		Scope:                 contextfrag.Scope{BotID: "bot-1"},
-		InitialMessageCount:   len(prefix),
-		Messages:              messages,
-		KeepRecentToolResults: 1,
+		Scope:                        contextfrag.Scope{BotID: "bot-1"},
+		InitialMessageCount:          len(prefix),
+		Messages:                     messages,
+		KeepRecentToolResults:        1,
+		ProviderInputAllowanceTokens: contextfrag.ProviderEnvelopeTokens("", messages, nil),
 	})
 	if selection.Truncated != 0 {
 		t.Fatalf("small results must not be truncated, got %d", selection.Truncated)
@@ -150,18 +153,19 @@ func TestStepReselectionTruncationRespectsMinMessages(t *testing.T) {
 	messages := loopSpanWithToolCycles(prefix, 3, 1000)
 
 	selection := SelectProviderStepMessages(context.Background(), agentpkg.ContextStepSelectionInput{
-		Scope:                 contextfrag.Scope{BotID: "bot-1"},
-		InitialMessageCount:   len(prefix),
-		Messages:              messages,
-		KeepRecentToolResults: 1,
-		MinMessages:           50,
+		Scope:                        contextfrag.Scope{BotID: "bot-1"},
+		InitialMessageCount:          len(prefix),
+		Messages:                     messages,
+		KeepRecentToolResults:        1,
+		MinMessages:                  50,
+		ProviderInputAllowanceTokens: contextfrag.ProviderEnvelopeTokens("", messages, nil),
 	})
 	if selection.Truncated != 0 {
 		t.Fatalf("below the message threshold nothing truncates, got %d", selection.Truncated)
 	}
 }
 
-func TestStepReselectionWindowZeroAppliesThresholdHygieneDeterministically(t *testing.T) {
+func TestStepReselectionWindowZeroPreservesCachePrefix(t *testing.T) {
 	t.Parallel()
 
 	prefix := []sdk.Message{sdk.UserMessage("task")}
@@ -180,10 +184,10 @@ func TestStepReselectionWindowZeroAppliesThresholdHygieneDeterministically(t *te
 	if first.FatalError != nil || first.Dropped != 0 {
 		t.Fatalf("window-zero selection enforced budget: %+v", first)
 	}
-	if first.Truncated != 6 {
-		t.Fatalf("truncated = %d, want six old results with newest four intact", first.Truncated)
+	if first.Truncated != 0 {
+		t.Fatalf("truncated = %d without measured context pressure", first.Truncated)
 	}
-	if first.Messages == nil ||
+	if first.Messages != nil ||
 		first.Dropped != second.Dropped ||
 		first.Truncated != second.Truncated ||
 		!reflect.DeepEqual(first.DropReasons, second.DropReasons) ||

@@ -4607,6 +4607,7 @@ SELECT
   m.content,
   m.metadata,
   m.turn_id,
+  m.run_id,
   m.turn_position,
   m.display_text,
   m.created_at,
@@ -4642,6 +4643,7 @@ type ListMessagesLatestUIBySessionRow struct {
 	Content                 []byte             `json:"content"`
 	Metadata                []byte             `json:"metadata"`
 	TurnID                  pgtype.UUID        `json:"turn_id"`
+	RunID                   pgtype.UUID        `json:"run_id"`
 	TurnPosition            pgtype.Int8        `json:"turn_position"`
 	DisplayText             pgtype.Text        `json:"display_text"`
 	CreatedAt               pgtype.Timestamptz `json:"created_at"`
@@ -4671,6 +4673,7 @@ func (q *Queries) ListMessagesLatestUIBySession(ctx context.Context, arg ListMes
 			&i.Content,
 			&i.Metadata,
 			&i.TurnID,
+			&i.RunID,
 			&i.TurnPosition,
 			&i.DisplayText,
 			&i.CreatedAt,

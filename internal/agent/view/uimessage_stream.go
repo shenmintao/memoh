@@ -63,10 +63,14 @@ func (c *UIMessageStreamConverter) HandleEvent(event UIMessageStreamEvent) []UIM
 		return nil
 
 	case "text_start":
+		c.reasoning = nil
 		c.text = &uiTextStreamState{ID: c.allocBlockID(UIMessageText, "")}
 		return nil
 
 	case "text_delta":
+		// ACP emits deltas without explicit end events. A text phase closes
+		// prior reasoning, matching the transcript's assistant-part boundaries.
+		c.reasoning = nil
 		if c.text == nil {
 			c.text = &uiTextStreamState{ID: c.allocBlockID(UIMessageText, "")}
 		}
@@ -82,10 +86,12 @@ func (c *UIMessageStreamConverter) HandleEvent(event UIMessageStreamEvent) []UIM
 		return nil
 
 	case "reasoning_start":
+		c.finalizeTextBlock()
 		c.reasoning = &uiTextStreamState{ID: c.allocBlockID(UIMessageReasoning, "")}
 		return nil
 
 	case "reasoning_delta":
+		c.finalizeTextBlock()
 		if c.reasoning == nil {
 			c.reasoning = &uiTextStreamState{ID: c.allocBlockID(UIMessageReasoning, "")}
 		}
@@ -100,7 +106,16 @@ func (c *UIMessageStreamConverter) HandleEvent(event UIMessageStreamEvent) []UIM
 		c.reasoning = nil
 		return nil
 
+	case "injected_user_message":
+		c.reasoning = nil
+		c.finalizeTextBlock()
+		return nil
+
 	case "tool_call_start", "tool_call_input_start", "tool_call_metadata":
+		// A late metadata update belongs to an existing tool, not a new phase.
+		if !strings.EqualFold(strings.TrimSpace(event.Type), "tool_call_metadata") {
+			c.reasoning = nil
+		}
 		state := c.findToolState(event.ToolCallID, event.ToolName)
 		if state == nil {
 			state = &uiToolStreamState{
@@ -156,6 +171,8 @@ func (c *UIMessageStreamConverter) HandleEvent(event UIMessageStreamEvent) []UIM
 	case "tool_approval_request":
 		state := c.findToolState(event.ToolCallID, event.ToolName)
 		if state == nil {
+			c.reasoning = nil
+			c.finalizeTextBlock()
 			state = &uiToolStreamState{
 				Message: UIMessage{
 					ID:         c.allocBlockID(UIMessageTool, strings.TrimSpace(event.ToolCallID)),
@@ -204,6 +221,8 @@ func (c *UIMessageStreamConverter) HandleEvent(event UIMessageStreamEvent) []UIM
 	case "user_input_request":
 		state := c.findToolState(event.ToolCallID, event.ToolName)
 		if state == nil {
+			c.reasoning = nil
+			c.finalizeTextBlock()
 			state = &uiToolStreamState{
 				Message: UIMessage{
 					ID:         c.allocBlockID(UIMessageTool, strings.TrimSpace(event.ToolCallID)),
@@ -248,6 +267,8 @@ func (c *UIMessageStreamConverter) HandleEvent(event UIMessageStreamEvent) []UIM
 		return []UIMessage{cloneToolStreamMessage(state.Message)}
 
 	case "tool_call_end":
+		c.reasoning = nil
+		c.finalizeTextBlock()
 		state := c.findToolState(event.ToolCallID, event.ToolName)
 		if state == nil {
 			state = &uiToolStreamState{

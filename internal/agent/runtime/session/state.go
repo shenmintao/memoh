@@ -84,6 +84,9 @@ func runtimeRunPatch(snapshot Snapshot, status, runError, steer, lease bool) Run
 		value := *run.Steer
 		patch.Steer = &value
 	}
+	if steer {
+		patch.SteerQueue = append([]SteerState(nil), run.SteerQueue...)
+	}
 	if lease {
 		value := time.Time{}
 		if run.OwnerLeaseExpiresAt != nil {

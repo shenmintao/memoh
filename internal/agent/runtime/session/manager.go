@@ -100,6 +100,7 @@ type runControl struct {
 	lifecycleCancel   context.CancelFunc
 	injectCh          chan<- turn.InjectMessage
 	injectMu          sync.Mutex
+	steerQueueMu      sync.Mutex
 	injectStopped     bool
 	converter         *chatview.UIMessageStreamConverter
 	leaseStop         func()
@@ -1121,12 +1122,22 @@ func (m *Manager) resolveTerminalStatus(ctx context.Context, handle RunHandle, s
 const steerRunFinishedError = "runtime run finished before steer was applied"
 
 func rejectPendingSteerOnRunFinish(run *CurrentRunView, now time.Time) {
-	if run == nil || run.Steer == nil || !isPendingSteerStatus(run.Steer.Status) {
+	if run == nil {
 		return
 	}
-	run.Steer.Status = SteerStatusRejected
-	run.Steer.Error = steerRunFinishedError
-	run.Steer.UpdatedAt = now
+	for i := range run.SteerQueue {
+		steer := &run.SteerQueue[i]
+		if isPendingSteerStatus(steer.Status) {
+			steer.Status = SteerStatusRejected
+			steer.Error = steerRunFinishedError
+			steer.UpdatedAt = now
+		}
+	}
+	if run.Steer != nil && isPendingSteerStatus(run.Steer.Status) {
+		run.Steer.Status = SteerStatusRejected
+		run.Steer.Error = steerRunFinishedError
+		run.Steer.UpdatedAt = now
+	}
 }
 
 func (m *Manager) finishRunState(ctx context.Context, handle RunHandle, status, errorCode, finishMessage string) (bool, error) {

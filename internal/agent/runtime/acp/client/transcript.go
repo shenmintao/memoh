@@ -41,6 +41,9 @@ func (b *TranscriptRecorder) Add(ev event.StreamEvent) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	switch ev.Type {
+	case event.InjectedUserMessage:
+		b.flushAssistant()
+		b.output = append(b.output, sdk.UserMessage(ev.Delta))
 	case event.ReasoningDelta:
 		b.appendReasoning(ev.Delta)
 	case event.TextDelta:

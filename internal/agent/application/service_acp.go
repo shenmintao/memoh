@@ -303,6 +303,7 @@ func (s *Service) streamACPAgentWS(ctx context.Context, req ChatRequest, eventCh
 	// The first text_delta lazily creates the text block instead.
 
 	result, err := s.acpPool.Prompt(idleCtx, acpagent.PromptInput{
+		InjectCh:                 req.InjectCh,
 		BotID:                    req.BotID,
 		ChatID:                   req.ChatID,
 		SessionID:                req.ThreadID,

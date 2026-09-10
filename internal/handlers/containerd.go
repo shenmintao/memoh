@@ -340,6 +340,7 @@ func (h *ContainerdHandler) Register(e *echo.Echo) {
 	root.POST("/mcp-stdio", h.CreateMCPStdio)
 	root.POST("/mcp-stdio/:connection_id", h.HandleMCPStdio)
 	root.POST("/tools", h.HandleMCPTools)
+	root.POST("/runtime-tools", h.HandleRuntimeMCPTools)
 }
 
 // CreateContainer godoc

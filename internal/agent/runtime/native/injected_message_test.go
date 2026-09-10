@@ -20,7 +20,8 @@ func TestAgentStreamRecordsInjectedMessageMutation(t *testing.T) {
 
 	const marker = "injected between provider steps"
 	injectCh := make(chan InjectMessage, 1)
-	injectCh <- InjectMessage{Text: marker}
+	var acknowledged atomic.Int32
+	injectCh <- InjectMessage{Text: marker, Applied: func() { acknowledged.Add(1) }}
 
 	var secondCall sdk.GenerateParams
 	provider := &atomicMockProvider{handler: func(call int, params sdk.GenerateParams) (*sdk.GenerateResult, error) {
@@ -66,6 +67,9 @@ func TestAgentStreamRecordsInjectedMessageMutation(t *testing.T) {
 				t.Fatalf("recorded injections at terminal delivery = %#v, want one", recorded)
 			}
 		}
+	}
+	if acknowledged.Load() != 1 {
+		t.Fatalf("applied callbacks = %d, want 1", acknowledged.Load())
 	}
 	if !providerAttemptContainsText(secondCall.Messages, marker) {
 		t.Fatalf("second provider call lost injected message: %#v", secondCall.Messages)
@@ -500,5 +504,47 @@ func TestAgentStreamRecordsOnlyAdmittedDuplicateInjection(t *testing.T) {
 	}
 	if recorded[0].insertAfter != 2 {
 		t.Fatalf("recorded insertion boundary = %d, want after first tool pair", recorded[0].insertAfter)
+	}
+}
+
+func TestLazyInjectionCollectsTextAddedDuringToolExecution(t *testing.T) {
+	pending := []string{"first"}
+	resolved, applied := false, false
+	injectCh := make(chan InjectMessage, 1)
+	injectCh <- InjectMessage{Resolve: func() (InjectMessage, bool) {
+		resolved = true
+		return InjectMessage{Text: strings.Join(pending, "\n\n"), Applied: func() { applied = true }}, true
+	}}
+	provider := &atomicMockProvider{handler: func(call int, params sdk.GenerateParams) (*sdk.GenerateResult, error) {
+		if call == 1 {
+			if resolved {
+				t.Error("resolved before tool boundary")
+			}
+			return &sdk.GenerateResult{
+				FinishReason: sdk.FinishReasonToolCalls,
+				ToolCalls:    []sdk.ToolCall{{ToolCallID: "boundary", ToolName: "lookup"}},
+			}, nil
+		}
+		if !providerAttemptContainsText(params.Messages, "first\n\nsecond\n\nthird") {
+			t.Error("cached messages not batched")
+		}
+		return &sdk.GenerateResult{Text: "done", FinishReason: sdk.FinishReasonStop}, nil
+	}}
+	a := New(Deps{})
+	a.SetToolProviders([]agenttools.ToolProvider{staticToolProvider{tools: []sdk.Tool{{
+		Name: "lookup", Parameters: &jsonschema.Schema{Type: "object"},
+		Execute: func(*sdk.ToolExecContext, any) (any, error) {
+			pending = append(pending, "second", "third")
+			return map[string]any{"ok": true}, nil
+		},
+	}}}})
+	for range a.Stream(context.Background(), RunConfig{
+		Model:    &sdk.Model{ID: "mock-model", Provider: provider},
+		Messages: []sdk.Message{sdk.UserMessage("start")}, SupportsToolCall: true, InjectCh: injectCh,
+		Identity: SessionContext{BotID: "bot-1"}, ContextMutations: contextfrag.NewMutationLedger(),
+	}) {
+	}
+	if !resolved || !applied {
+		t.Fatal("batch missing consumption receipt")
 	}
 }

@@ -60,6 +60,7 @@ type Message struct {
 	Metadata                map[string]any  `json:"metadata,omitempty"`
 	RawMetadata             json.RawMessage `json:"-"`
 	TurnID                  string          `json:"turn_id,omitempty"`
+	RunID                   string          `json:"run_id,omitempty"`
 	// TurnPosition is the immutable turn-level sequence reserved at admission
 	// (SR-TURN-001). It is loaded on the UI read path so the frontend can
 	// order and reconcile turns without guessing from text or timestamps.

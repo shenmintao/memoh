@@ -2437,6 +2437,10 @@ definitions:
         - assistant
         - system
         type: string
+      run_id:
+        description: A running task can contain several user turns after supplements.
+        format: uuid
+        type: string
       sender_avatar_url:
         type: string
       sender_display_name:

@@ -27,11 +27,12 @@ const connectingTimeout = 30 * time.Second
 
 // Client wraps a gRPC connection to a single MCP container.
 type Client struct {
-	conn      *grpc.ClientConn
-	svc       pb.ContainerServiceClient
-	target    string
-	createdAt time.Time
-	ownsConn  bool
+	conn           *grpc.ClientConn
+	svc            pb.ContainerServiceClient
+	target         string
+	createdAt      time.Time
+	ownsConn       bool
+	capabilityConn grpc.ClientConnInterface
 }
 
 // NewClientFromConn wraps an existing gRPC connection into a Client.
@@ -108,11 +109,12 @@ func (c *Client) WithOutgoingMetadata(values map[string]string) *Client {
 	}
 	conn := &outgoingMetadataConn{ClientConnInterface: c.conn, values: cloneStringMap(values)}
 	return &Client{
-		conn:      c.conn,
-		svc:       pb.NewContainerServiceClient(conn),
-		target:    c.target,
-		createdAt: c.createdAt,
-		ownsConn:  false,
+		conn:           c.conn,
+		svc:            pb.NewContainerServiceClient(conn),
+		target:         c.target,
+		createdAt:      c.createdAt,
+		ownsConn:       false,
+		capabilityConn: conn,
 	}
 }
 

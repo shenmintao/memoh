@@ -267,16 +267,8 @@ func openAIEffortOptions(clientType ClientType, rc *ReasoningConfig) []sdk.Gener
 	}
 }
 
-// openAIWireEffort retains the generic OpenAI clients' existing max-to-xhigh
-// compatibility behavior. Codex accepts the catalog-advertised max value.
-//
-// The resolver already filters "max" out of the selectable tiers for these
-// clients, so this only fires for values that bypassed it — a stale stored effort,
-// or a caller that built a ReasoningConfig by hand.
-func openAIWireEffort(clientType ClientType, effort string) string {
-	if clientType != ClientTypeOpenAICodex && effort == reasoning.EffortMax {
-		return reasoning.EffortXHigh
-	}
+// The resolver selects a model-advertised tier; preserve that exact wire value.
+func openAIWireEffort(_ ClientType, effort string) string {
 	return effort
 }
 

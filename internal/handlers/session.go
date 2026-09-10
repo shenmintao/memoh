@@ -1040,7 +1040,7 @@ func filterSessionsForPermissions(items []session.Thread, userID string, perms [
 // native-workspace workdirs — the ACP runtime cannot reach a remote computer
 // yet, so accepting the binding would create a session that fails on its
 // first prompt.
-func (h *SessionHandler) resolveCreateSessionWorkdir(ctx context.Context, botID, workdirID, runtimeType string) (*workdir.Workdir, error) {
+func (h *SessionHandler) resolveCreateSessionWorkdir(ctx context.Context, botID, workdirID, _ string) (*workdir.Workdir, error) {
 	workdirID = strings.TrimSpace(workdirID)
 	if workdirID == "" {
 		return nil, nil

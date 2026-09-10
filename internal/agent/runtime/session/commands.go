@@ -919,7 +919,7 @@ func (m *Manager) requestAbort(ctx context.Context, ctrl *runControl) (bool, err
 }
 
 func (m *Manager) Steer(ctx context.Context, botID, sessionID, runID, text string) (SteerState, error) {
-	return m.steer(ctx, botID, sessionID, runID, "", text)
+	return m.steer(ctx, botID, sessionID, runID, "", "", text)
 }
 
 func (m *Manager) SteerRun(ctx context.Context, handle RunHandle, text string) (SteerState, error) {
@@ -927,10 +927,28 @@ func (m *Manager) SteerRun(ctx context.Context, handle RunHandle, text string) (
 	if !handle.valid() {
 		return SteerState{}, ErrRunOwnershipLost
 	}
-	return m.steer(ctx, handle.BotID, handle.SessionID, handle.RunID, handle.Generation, text)
+	return m.steer(ctx, handle.BotID, handle.SessionID, handle.RunID, handle.Generation, "", text)
 }
 
-func (m *Manager) steer(ctx context.Context, botID, sessionID, runID, expectedGeneration, text string) (SteerState, error) {
+func (m *Manager) SteerControl(ctx context.Context, botID, sessionID, runID, controlID, previousID, text string) (SteerState, error) {
+	if _, err := uuid.Parse(controlID); err != nil || strings.TrimSpace(runID) == "" || len(text) > 128000 {
+		return SteerState{}, errors.New("invalid steering request")
+	}
+	return m.steer(ctx, botID, sessionID, runID, "", controlID, text, previousID)
+}
+
+func (m *Manager) steer(ctx context.Context, botID, sessionID, runID, expectedGeneration, controlID, text string, previousIDs ...string) (SteerState, error) {
+	return m.steerWithQueue(ctx, botID, sessionID, runID, expectedGeneration, controlID, text, false, previousIDs...)
+}
+
+func (m *Manager) QueueSteerControl(ctx context.Context, botID, sessionID, runID, controlID, text string) (SteerState, error) {
+	if _, err := uuid.Parse(controlID); err != nil || strings.TrimSpace(runID) == "" || len(text) > 128000 {
+		return SteerState{}, errors.New("invalid steering request")
+	}
+	return m.steerWithQueue(ctx, botID, sessionID, runID, "", controlID, text, true)
+}
+
+func (m *Manager) steerWithQueue(ctx context.Context, botID, sessionID, runID, expectedGeneration, controlID, text string, queue bool, previousIDs ...string) (SteerState, error) {
 	if m == nil || m.backend == nil {
 		return SteerState{}, errors.New("session runtime manager is not configured")
 	}
@@ -967,12 +985,35 @@ func (m *Manager) steer(ctx context.Context, botID, sessionID, runID, expectedGe
 	var ownerID string
 	var commandGeneration string
 	var commandCreatedAt time.Time
+	duplicate := false
 	_, _, err = m.updateActiveAndPublish(ctx, handle, func(snapshot Snapshot, now time.Time) (Snapshot, bool, error) {
 		if snapshot.CurrentRunView.RunID != runID || !strings.EqualFold(snapshot.CurrentRunView.Status, RunStatusRunning) {
 			return snapshot, false, errors.New("target runtime run is not active")
 		}
-		if snapshot.CurrentRunView.Steer != nil && isPendingSteerStatus(snapshot.CurrentRunView.Steer.Status) {
+		if existing := findQueuedSteer(snapshot.CurrentRunView, controlID); controlID != "" && existing != nil {
+			if existing.Text != text {
+				return snapshot, false, errors.New("conflicting steering request")
+			}
+			steer = *existing
+			duplicate = true
+			return snapshot, false, nil
+		}
+		if len(previousIDs) > 0 {
+			currentID := ""
+			if snapshot.CurrentRunView.Steer != nil {
+				currentID = snapshot.CurrentRunView.Steer.ID
+			}
+			if currentID != previousIDs[0] {
+				return snapshot, false, errors.New("steering state changed")
+			}
+		}
+		if !queue && hasPendingSteers(snapshot.CurrentRunView) {
 			return snapshot, false, errors.New("another runtime steer command is still pending")
+		}
+		if queue || len(snapshot.CurrentRunView.SteerQueue) > 0 {
+			if err := checkSteerQueueCapacity(snapshot.CurrentRunView, text); err != nil {
+				return snapshot, false, err
+			}
 		}
 		steer = SteerState{
 			ID:        uuid.NewString(),
@@ -981,9 +1022,18 @@ func (m *Manager) steer(ctx context.Context, botID, sessionID, runID, expectedGe
 			CreatedAt: now,
 			UpdatedAt: now,
 		}
+		if controlID != "" {
+			steer.ID = controlID
+		}
 		commandCreatedAt = now
 		snapshot.Seq++
 		snapshot.UpdatedAt = now
+		if queue || len(snapshot.CurrentRunView.SteerQueue) > 0 {
+			if len(snapshot.CurrentRunView.SteerQueue) == 0 && snapshot.CurrentRunView.Steer != nil {
+				snapshot.CurrentRunView.SteerQueue = append(snapshot.CurrentRunView.SteerQueue, *snapshot.CurrentRunView.Steer)
+			}
+			snapshot.CurrentRunView.SteerQueue = append(snapshot.CurrentRunView.SteerQueue, steer)
+		}
 		snapshot.CurrentRunView.Steer = &steer
 		snapshot.CurrentRunView.UpdatedAt = now
 		ownerID = strings.TrimSpace(snapshot.CurrentRunView.OwnerID)
@@ -996,6 +1046,9 @@ func (m *Manager) steer(ctx context.Context, botID, sessionID, runID, expectedGe
 		return SteerState{}, err
 	}
 
+	if duplicate {
+		return steer, nil
+	}
 	cmd := Command{
 		Type: CommandSteer, BotID: botID, SessionID: sessionID, RunID: runID,
 		Generation: commandGeneration, SteerID: steer.ID, Text: text, CreatedAt: commandCreatedAt,
@@ -1015,7 +1068,9 @@ func (m *Manager) steer(ctx context.Context, botID, sessionID, runID, expectedGe
 			return steer, err
 		}
 	}
-	m.rejectPendingSteerAfterTimeout(context.WithoutCancel(ctx), handle, steer.ID)
+	if !queue {
+		m.rejectPendingSteerAfterTimeout(context.WithoutCancel(ctx), handle, steer.ID)
+	}
 	return steer, nil
 }
 
@@ -1566,6 +1621,10 @@ func runtimeCommandTargetPresent(run *CurrentRunView, commandType, targetID stri
 }
 
 func (m *Manager) applySteerCommand(ctx context.Context, cmd Command) {
+	if snapshot, _, err := m.backend.Load(ctx, Key{BotID: cmd.BotID, SessionID: cmd.SessionID}); err == nil && snapshot.CurrentRunView != nil && len(snapshot.CurrentRunView.SteerQueue) > 0 {
+		m.dispatchSteerQueue(ctx, runHandleForCommand(cmd))
+		return
+	}
 	handle := runHandleForCommand(cmd)
 	if err := m.ValidateRunOwnership(ctx, handle); err != nil {
 		_ = m.updateSteerStatus(context.WithoutCancel(ctx), handle, cmd.SteerID, SteerStatusRejected, ErrRunOwnershipLost.Error())
@@ -1590,6 +1649,10 @@ func (m *Manager) applySteerCommand(ctx context.Context, cmd Command) {
 			return
 		}
 		sent, sendError := ctrl.sendInject(ctx, turn.InjectMessage{
+			ID: cmd.SteerID,
+			Rejected: func(reason string) {
+				_ = m.updateSteerStatus(context.WithoutCancel(ctx), handle, cmd.SteerID, SteerStatusRejected, reason)
+			},
 			Text: strings.TrimSpace(cmd.Text),
 			Applied: func() {
 				if err := m.updateSteerStatus(context.WithoutCancel(ctx), handle, cmd.SteerID, SteerStatusApplied, ""); err != nil {
@@ -1635,23 +1698,35 @@ func (m *Manager) transitionSteerStatus(ctx context.Context, handle RunHandle, s
 		if !runMatchesHandle(snapshot.CurrentRunView, handle) {
 			return snapshot, false, nil
 		}
-		if snapshot.CurrentRunView.Steer == nil || snapshot.CurrentRunView.Steer.ID != steerID {
+		steer := findQueuedSteer(snapshot.CurrentRunView, steerID)
+		if steer == nil {
 			return snapshot, false, nil
 		}
-		currentStatus := snapshot.CurrentRunView.Steer.Status
+		currentStatus := steer.Status
 		if !validSteerTransition(currentStatus, status) {
 			return snapshot, false, nil
 		}
 		snapshot.Seq++
 		snapshot.UpdatedAt = now
 		snapshot.CurrentRunView.UpdatedAt = now
-		snapshot.CurrentRunView.Steer.Status = status
-		snapshot.CurrentRunView.Steer.Error = strings.TrimSpace(errText)
-		snapshot.CurrentRunView.Steer.UpdatedAt = now
+		steer.Status = status
+		if status == SteerStatusQueued && steer.AfterMessageID == nil {
+			afterMessageID := -1
+			for _, message := range snapshot.CurrentRunView.Messages {
+				afterMessageID = max(afterMessageID, message.ID)
+			}
+			steer.AfterMessageID = &afterMessageID
+		}
+		steer.Error = strings.TrimSpace(errText)
+		steer.UpdatedAt = now
+		syncLatestSteer(snapshot.CurrentRunView)
 		return snapshot, true, nil
 	}, func(snapshot Snapshot) RuntimeDelta {
 		return runtimeRunPatch(snapshot, false, false, true, false)
 	})
+	if changed && err == nil && (status == SteerStatusApplied || status == SteerStatusRejected) {
+		m.dispatchSteerQueue(context.WithoutCancel(ctx), handle)
+	}
 	return changed, err
 }
 

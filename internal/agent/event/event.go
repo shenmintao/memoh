@@ -8,6 +8,7 @@ import "encoding/json"
 type StreamEventType string
 
 const (
+	InjectedUserMessage                 = "injected_user_message"
 	AgentStart          StreamEventType = "agent_start"
 	TextStart           StreamEventType = "text_start"
 	TextDelta           StreamEventType = "text_delta"

@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/felinics/memoh/internal/agent/application"
+	"github.com/felinics/memoh/internal/agent/runtime/native"
 	sessionruntime "github.com/felinics/memoh/internal/agent/runtime/session"
 	"github.com/felinics/memoh/internal/agent/turn"
 	chatview "github.com/felinics/memoh/internal/agent/view"
@@ -668,5 +669,66 @@ func TestStartWSStreamPublishesAdmittedTurnAndReleasesTheSession(t *testing.T) {
 	write := runtime.awaitTerminalWrite(t)
 	if write.status != "" || write.handle.FencingToken != 3 {
 		t.Fatalf("terminal write = %+v, want an unnamed outcome fenced by the admitted token", write)
+	}
+}
+
+type disconnectedWSRuntime struct {
+	*stubWSTurnAdmitter
+	published chan native.StreamEvent
+}
+
+func (r *disconnectedWSRuntime) HandleAgentEvent(ctx context.Context, _ sessionruntime.RunHandle, event native.StreamEvent) ([]chatview.UIMessage, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	r.published <- event
+	return nil, nil
+}
+
+func TestAcceptedWSTurnFinishesAndPublishesAfterAppDisconnects(t *testing.T) {
+	t.Parallel()
+	runtime := &disconnectedWSRuntime{
+		stubWSTurnAdmitter: newStubWSTurnAdmitter(),
+		published:          make(chan native.StreamEvent, 1),
+	}
+	runtime.admission = startedWSAdmission()
+	handler := &LocalChannelHandler{logger: slog.Default(), sessionRuntime: runtime}
+	writer := &wsWriter{ch: make(chan []byte, 16), stop: make(chan struct{}), done: make(chan struct{})}
+	requestCtx, disconnect := context.WithCancel(t.Context())
+	defer disconnect()
+	// HandleWebSocket detaches the run's owner context from the HTTP request.
+	baseCtx := context.WithoutCancel(requestCtx)
+	disconnected := make(chan struct{})
+	_, started := handler.startWSStream(baseCtx, requestCtx, writer, wsAdmissionBotID, wsAdmissionTestRef(), "disconnect-test", wsAdmissionTestSubmission(), nil, nil,
+		func(ctx context.Context, _ wsTurnRef, _ wsAdmittedTurn, events chan<- application.WSStreamEvent, abort <-chan struct{}) error {
+			<-disconnected
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			select {
+			case <-abort:
+				return errors.New("observer disconnect incorrectly aborted the run")
+			default:
+			}
+			events <- application.WSStreamEvent(`{"type":"text_delta","delta":"completed while app offline"}`)
+			return nil
+		})
+	if !started {
+		t.Fatal("run was not admitted")
+	}
+	disconnect()
+	close(writer.stop)
+	close(disconnected)
+	write := runtime.awaitTerminalWrite(t)
+	if write.status != "" {
+		t.Fatalf("offline run failed: %+v", write)
+	}
+	select {
+	case event := <-runtime.published:
+		if event.Delta != "completed while app offline" {
+			t.Fatalf("published output = %+v", event)
+		}
+	default:
+		t.Fatal("offline output was not published before run completion")
 	}
 }

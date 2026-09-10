@@ -301,11 +301,11 @@ func TestResolveReasoningConfig(t *testing.T) {
 			want:          &models.ReasoningConfig{Active: true, Adaptive: true, Effort: models.ReasoningEffortXHigh},
 		},
 		{
-			name:          "generic openai compatibility drops max and falls back to medium",
+			name:          "generic openai preserves advertised max",
 			model:         adaptiveModel,
 			requestEffort: models.ReasoningEffortMax,
 			clientType:    string(models.ClientTypeOpenAICompletions),
-			want:          &models.ReasoningConfig{Active: true, Adaptive: true, Effort: models.ReasoningEffortMedium},
+			want:          &models.ReasoningConfig{Active: true, Adaptive: true, Effort: models.ReasoningEffortMax},
 		},
 		{
 			name:          "codex wire preserves max",

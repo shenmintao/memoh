@@ -20,6 +20,7 @@ type injectedMessageAdmission struct {
 	messageIndex int
 	text         string
 	admitted     bool
+	applied      func()
 }
 
 func (s *injectedMessageState) nextStep() int {
@@ -32,15 +33,20 @@ func (s *injectedMessageState) nextStep() int {
 	return s.prepareCalls
 }
 
-func (s *injectedMessageState) record(step, messageIndex int, text string) {
+func (s *injectedMessageState) record(step, messageIndex int, text string, callbacks ...func()) {
 	if s == nil {
 		return
+	}
+	var applied func()
+	if len(callbacks) > 0 {
+		applied = callbacks[0]
 	}
 	s.mu.Lock()
 	s.records = append(s.records, injectedMessageAdmission{
 		step:         step,
 		messageIndex: messageIndex,
 		text:         text,
+		applied:      applied,
 	})
 	s.mu.Unlock()
 }
@@ -56,6 +62,25 @@ func (s *injectedMessageState) reconcilePreparedMessages(step int, admissions []
 			continue
 		}
 		s.records[i].admitted = preparedAdmissionsContainIndex(admissions, s.records[i].messageIndex)
+	}
+}
+
+func (s *injectedMessageState) acknowledgeCommitted(step int) {
+	if s == nil {
+		return
+	}
+	var callbacks []func()
+	s.mu.Lock()
+	for i := range s.records {
+		record := &s.records[i]
+		if record.step == step && record.admitted && record.applied != nil {
+			callbacks = append(callbacks, record.applied)
+			record.applied = nil
+		}
+	}
+	s.mu.Unlock()
+	for _, callback := range callbacks {
+		callback()
 	}
 }
 

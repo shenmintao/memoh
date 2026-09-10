@@ -9,7 +9,7 @@ func TestResolveSessionContextRejectsUnknownBackend(t *testing.T) {
 	_, err := ResolveSessionContext(SessionContextInput{
 		AgentID:   "hermes",
 		SetupMode: SetupModeAPIKey,
-		Backend:   "remote",
+		Backend:   "unsupported",
 	})
 	if err == nil || !strings.Contains(err.Error(), "unsupported workspace backend") {
 		t.Fatalf("ResolveSessionContext() error = %v, want unsupported backend", err)

@@ -264,7 +264,7 @@ func TestACPRuntimeHandlerEnsureStartsRuntimeAndReturnsModels(t *testing.T) {
 	if pool.ensureInput.BotID != botID || pool.ensureInput.SessionID != sessionID || pool.ensureInput.AgentID != acpprofile.AgentCodexID || pool.ensureInput.ProjectPath != "/data/app" {
 		t.Fatalf("Ensure input = %#v", pool.ensureInput)
 	}
-	if pool.ensureInput.SessionToken != "" || pool.ensureInput.ToolHTTPURL != "http://example.com/bots/"+botID+"/tools" {
+	if pool.ensureInput.SessionToken != "" || pool.ensureInput.ToolHTTPURL != "http://example.com/bots/"+botID+"/runtime-tools" {
 		t.Fatalf("Ensure tool context = %#v", pool.ensureInput)
 	}
 	var got acpagent.RuntimeStatus
@@ -495,7 +495,7 @@ func TestACPRuntimeHandlerSetModel(t *testing.T) {
 	if pool.setModelInput.BotID != botID || pool.setModelInput.SessionID != sessionID || pool.setModelInput.AgentID != acpprofile.AgentCodexID || pool.setModelInput.ProjectPath != "/data/app" {
 		t.Fatalf("SetModel input = %#v", pool.setModelInput)
 	}
-	if pool.setModelInput.SessionToken != "" || pool.setModelInput.ToolHTTPURL != "http://example.com/bots/"+botID+"/tools" {
+	if pool.setModelInput.SessionToken != "" || pool.setModelInput.ToolHTTPURL != "http://example.com/bots/"+botID+"/runtime-tools" {
 		t.Fatalf("SetModel tool context = %#v", pool.setModelInput)
 	}
 	if pool.setModelID != "gpt-5.1-codex-high" {
@@ -573,7 +573,7 @@ func TestACPRuntimeHandlerSetReasoning(t *testing.T) {
 	if pool.setReasoningInput.BotID != botID || pool.setReasoningInput.SessionID != sessionID || pool.setReasoningEffort != "low" {
 		t.Fatalf("SetReasoning call = %#v, %q", pool.setReasoningInput, pool.setReasoningEffort)
 	}
-	if pool.setReasoningInput.ToolHTTPURL != "http://example.com/bots/"+botID+"/tools" {
+	if pool.setReasoningInput.ToolHTTPURL != "http://example.com/bots/"+botID+"/runtime-tools" {
 		t.Fatalf("SetReasoning tool context = %#v", pool.setReasoningInput)
 	}
 	if pool.setReasoningCtxErr != nil {
@@ -648,7 +648,7 @@ func TestACPRuntimeHandlerCreateRuntime(t *testing.T) {
 	if pool.createInput.RuntimeOwnerAccountID != "user-1" {
 		t.Fatalf("CreateRuntime owner = %q, want authenticated user", pool.createInput.RuntimeOwnerAccountID)
 	}
-	if pool.createInput.ToolHTTPURL != "http://example.com/bots/"+botID+"/tools" {
+	if pool.createInput.ToolHTTPURL != "http://example.com/bots/"+botID+"/runtime-tools" {
 		t.Fatalf("CreateRuntime tool context = %#v", pool.createInput)
 	}
 	var got map[string]any
@@ -1143,7 +1143,7 @@ func TestBuildACPMCPToolsURLUsesOnlyExplicitOrLoopbackBaseURL(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/acp-runtime", nil)
 		req.Header.Set("X-Forwarded-Host", "evil.example")
 		got := buildACPMCPToolsURLFromRequest(req, botID)
-		want := "https://memoh.example/bots/" + botID + "/tools"
+		want := "https://memoh.example/bots/" + botID + "/runtime-tools"
 		if got != want {
 			t.Fatalf("tools URL = %q, want %q", got, want)
 		}
@@ -1154,7 +1154,7 @@ func TestBuildACPMCPToolsURLUsesOnlyExplicitOrLoopbackBaseURL(t *testing.T) {
 		req.Header.Set("X-Forwarded-Host", "evil.example")
 		req.Header.Set("X-Forwarded-Proto", "https")
 		got := buildACPMCPToolsURLFromRequest(req, botID)
-		want := "http://127.0.0.1:18080/bots/" + botID + "/tools"
+		want := "http://127.0.0.1:18080/bots/" + botID + "/runtime-tools"
 		if got != want {
 			t.Fatalf("tools URL = %q, want %q", got, want)
 		}

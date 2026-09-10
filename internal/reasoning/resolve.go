@@ -23,13 +23,6 @@ type Config struct {
 // client-type string; this constant is what it is compared against.
 const ClientTypeAnthropicMessages = "anthropic-messages"
 
-// Client types whose wire policy maps "max" onto "xhigh". Codex uses its catalog
-// levels directly and is deliberately absent.
-const (
-	clientTypeOpenAICompletions = "openai-completions"
-	clientTypeOpenAIResponses   = "openai-responses"
-)
-
 // ResolveConfig makes the single reasoning decision for a call.
 //
 // It takes the same Options projection that capability surfaces render. This is
@@ -159,35 +152,20 @@ func pickEffort(requested, stored string, levels []string) string {
 	return EffortMedium
 }
 
-// effectiveEfforts intersects the model's advertised effort levels with the
-// selected client's wire policy, and supplies the common base when a model
-// advertises nothing. Generic OpenAI-format clients drop "max" (they take xhigh as
-// the ceiling); Codex uses its catalog levels directly.
-func effectiveEfforts(advertised []string, clientType string) []string {
+// effectiveEfforts honors model-advertised tiers, including max on newer OpenAI
+// models. Undeclared models retain the conservative low/medium/high default.
+func effectiveEfforts(advertised []string, _ string) []string {
 	levels := advertised
 	if len(levels) == 0 {
 		levels = []string{EffortLow, EffortMedium, EffortHigh}
 	}
 	out := make([]string, 0, len(levels))
 	for _, e := range levels {
-		if normalizesMax(clientType) && e == EffortMax {
-			continue
-		}
 		if !hasEffort(out, e) {
 			out = append(out, e)
 		}
 	}
 	return out
-}
-
-// normalizesMax reports whether the client's wire policy maps "max" to "xhigh".
-func normalizesMax(clientType string) bool {
-	switch clientType {
-	case clientTypeOpenAICompletions, clientTypeOpenAIResponses:
-		return true
-	default:
-		return false
-	}
 }
 
 // offEffortFor translates "off" into the effort value an OpenAI-format provider

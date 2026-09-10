@@ -193,13 +193,15 @@ type runtimeCursor struct {
 // dedupes or recovers on — session, epoch, seq — is top level, so a client can
 // route and order a frame without decoding the payload it carries.
 type runtimeOutboundEvent struct {
-	Type      string                       `json:"type"`
-	SessionID string                       `json:"session_id"`
-	Epoch     string                       `json:"epoch,omitempty"`
-	Seq       int64                        `json:"seq"`
-	Snapshot  *sessionruntime.Snapshot     `json:"snapshot,omitempty"`
-	Delta     *sessionruntime.RuntimeDelta `json:"delta,omitempty"`
-	Message   string                       `json:"message,omitempty"`
+	SteerQueueSupported bool                         `json:"steer_queue_supported,omitempty"`
+	SteerSupported      bool                         `json:"steer_supported,omitempty"`
+	Type                string                       `json:"type"`
+	SessionID           string                       `json:"session_id"`
+	Epoch               string                       `json:"epoch,omitempty"`
+	Seq                 int64                        `json:"seq"`
+	Snapshot            *sessionruntime.Snapshot     `json:"snapshot,omitempty"`
+	Delta               *sessionruntime.RuntimeDelta `json:"delta,omitempty"`
+	Message             string                       `json:"message,omitempty"`
 }
 
 const (
@@ -416,6 +418,8 @@ func runtimeEventFrame(sessionID string, event sessionruntime.Event) (runtimeOut
 		if event.Snapshot == nil {
 			return runtimeOutboundEvent{}, false
 		}
+		frame.SteerSupported = true
+		frame.SteerQueueSupported = true
 		frame.Type = sessionruntime.EventRuntimeSnapshot
 		frame.Snapshot = event.Snapshot
 		return frame, true

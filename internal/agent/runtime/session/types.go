@@ -272,6 +272,7 @@ type CurrentRunView struct {
 	ErrorCode           string               `json:"error_code,omitempty"`
 	Error               string               `json:"error,omitempty"`
 	Steer               *SteerState          `json:"steer,omitempty"`
+	SteerQueue          []SteerState         `json:"steer_queue,omitempty"`
 	Operation           *RunOperationView    `json:"operation,omitempty"`
 }
 
@@ -291,12 +292,15 @@ type RunOperationView struct {
 }
 
 type SteerState struct {
-	ID        string    `json:"id"`
-	Status    string    `json:"status"`
-	Text      string    `json:"text,omitempty"`
-	Error     string    `json:"error,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID     string `json:"id"`
+	Status string `json:"status"`
+	Text   string `json:"text,omitempty"`
+	Error  string `json:"error,omitempty"`
+	// AfterMessageID anchors the consumed batch in the live projection. -1
+	// means before its first assistant block; nil is a legacy receipt.
+	AfterMessageID *int      `json:"after_message_id,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 type Event struct {
@@ -324,13 +328,14 @@ type RuntimeDelta struct {
 }
 
 type CurrentRunPatch struct {
-	RunID               string      `json:"run_id"`
-	Status              *string     `json:"status,omitempty"`
-	ErrorCode           *string     `json:"error_code,omitempty"`
-	Error               *string     `json:"error,omitempty"`
-	Steer               *SteerState `json:"steer,omitempty"`
-	UpdatedAt           *time.Time  `json:"updated_at,omitempty"`
-	OwnerLeaseExpiresAt *time.Time  `json:"owner_lease_expires_at,omitempty"`
+	RunID               string       `json:"run_id"`
+	Status              *string      `json:"status,omitempty"`
+	ErrorCode           *string      `json:"error_code,omitempty"`
+	Error               *string      `json:"error,omitempty"`
+	Steer               *SteerState  `json:"steer,omitempty"`
+	SteerQueue          []SteerState `json:"steer_queue,omitempty"`
+	UpdatedAt           *time.Time   `json:"updated_at,omitempty"`
+	OwnerLeaseExpiresAt *time.Time   `json:"owner_lease_expires_at,omitempty"`
 }
 
 type RuntimeMessageAppend struct {

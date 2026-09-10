@@ -48,12 +48,29 @@ func tagFragments(frags []contextfrag.ContextFrag, profile IntentProfile) []Tagg
 		}
 		tagged = append(tagged, next)
 	}
-	markRecentAndDropTags(tagged)
+	markRecentAndDropTags(tagged, profile.ProtectRecentTailOnly)
 	return tagged
 }
 
-func markRecentAndDropTags(tagged []TaggedFrag) {
+func markRecentAndDropTags(tagged []TaggedFrag, protectRecentTailOnly bool) {
 	if len(tagged) == 0 {
+		return
+	}
+	if protectRecentTailOnly {
+		// Status carriers must survive, but cannot hide the newest tool cycle
+		// when locating the tail whose call/results must remain intact.
+		end := len(tagged)
+		for end > 0 && tagged[end-1].Frag.Kind == contextfrag.KindBackgroundSummary {
+			end--
+		}
+		start := recentTailProtectedStart(tagged[:end], 0)
+		for i := range tagged {
+			if i >= start || tagged[i].HasTag(TagMustKeep) {
+				tagged[i].Tags = appendSelectionTag(tagged[i].Tags, TagPreserveRecent)
+			} else {
+				tagged[i].Tags = appendSelectionTag(tagged[i].Tags, TagCanDrop)
+			}
+		}
 		return
 	}
 	if latestUser := latestUserIndex(tagged); latestUser == 0 && len(tagged) > 1 {

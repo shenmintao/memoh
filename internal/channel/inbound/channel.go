@@ -4032,7 +4032,7 @@ func acpMCPToolsURLFromEnv(botID string) string {
 	if base == "" {
 		return ""
 	}
-	return base + "/bots/" + url.PathEscape(strings.TrimSpace(botID)) + "/tools"
+	return base + "/bots/" + url.PathEscape(strings.TrimSpace(botID)) + "/runtime-tools"
 }
 
 func looksLikeApprovalID(value string) bool {

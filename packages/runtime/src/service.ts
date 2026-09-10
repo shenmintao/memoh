@@ -18,6 +18,7 @@ import {
 import { loadSync } from '@grpc/proto-loader'
 
 import { ChildSupervisor } from './children'
+import { capabilityService } from './capabilities/service'
 import { WorkspaceExecService } from './core/exec'
 import { rawChunkSize, WorkspaceFileService } from './core/fs'
 import { HostPathResolver } from './core/paths'
@@ -66,6 +67,8 @@ export async function startRuntimeGrpcServer(
     'grpc.max_send_message_length': grpcMessageLimit,
   })
   server.addService(await loadContainerServiceDefinition(), implementation)
+  const capabilities = await capabilityService(options.workspaceBase)
+  server.addService(capabilities.definition, capabilities.implementation)
   // grpc-js 1.14.4 exposes a public connection injector that hands an
   // existing Duplex directly to its HTTP/2 server. This deliberately avoids
   // opening a second loopback TCP, Unix-socket, or named-pipe listener.
@@ -99,6 +102,7 @@ export async function startRuntimeGrpcServer(
           connection.destroy()
         }
         connections.clear()
+        await capabilities.close()
         await children.close()
         // tryShutdown closes the injector-owned HTTP/2 server and releases
         // the channelz reference created by createConnectionInjector().

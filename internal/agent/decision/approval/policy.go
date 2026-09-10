@@ -141,6 +141,12 @@ func explicitModeDecision(mode PolicyMode) (string, bool) {
 }
 
 func OperationForTool(toolName string) (string, bool) {
+	if strings.HasPrefix(toolName, "computer_mcp_") {
+		return OperationExec, true
+	}
+	if strings.HasPrefix(toolName, "computer_skill_") {
+		return OperationRead, true
+	}
 	switch strings.ToLower(strings.TrimSpace(toolName)) {
 	case "read", "list":
 		return OperationRead, true
