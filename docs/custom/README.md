@@ -22,10 +22,11 @@
 1. `git clone --recurse-submodules https://github.com/shenmintao/memoh.git`。
 2. 参考上游 README 配置本地开发环境；运行 `go test ./...`、`golangci-lint run ./...`，以及 `pnpm install --frozen-lockfile` 后的前端检查。
 3. 同步上游：`git fetch upstream`，`git merge upstream/main`。新 clone 需先 `git remote add upstream https://github.com/felinics/Memoh.git`。解决冲突后重点回归队列、ACP、MCP 鉴权与缓存。
-4. 更新定制版本说明，推送版本标签；手动运行 Custom Release，上传 Linux amd64/arm64 server/bridge、完整源码及 SHA256SUMS 到草稿 Release。Web 镜像按上游 Dockerfile 构建，不能仅替换后端来完成跨版本升级。
+4. 更新定制版本说明，推送版本标签；手动运行 Custom Release，上传 Linux amd64/arm64 server/channel/bridge/mcp、完整源码及 SHA256SUMS 到草稿 Release。二进制写入版本标签、提交号和构建时间。Web 镜像按上游 Dockerfile 构建，不能仅替换后端来完成跨版本升级。
 5. 用测试数据库与测试工作区确认迁移、初始化和端到端功能后发布。服务端部署与 GitHub 源码发布是独立动作；不要把生产 config.toml、数据库、令牌、会话内容或 `.memoh` 目录加入 Git。
 
 原上游 npm 发布 workflow 保存在本目录供同步参考，定制仓库不向上游 npm 命名空间发布。
+上游 AGENTS.md 与模型能力定时任务在定制仓库默认不运行，维护者仍可手动触发。
 
 ## 本次验证（2026-09-10）
 

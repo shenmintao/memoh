@@ -11,6 +11,7 @@ permissions:
 
 jobs:
   update:
+    if: github.repository == 'felinics/Memoh' || github.event_name == 'workflow_dispatch'
     uses: sheepbox8646/agents-md-updater/.github/workflows/update-agents-md.yml@main
     with:
       agent: claude
