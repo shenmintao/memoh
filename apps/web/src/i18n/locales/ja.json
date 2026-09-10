@@ -54,6 +54,7 @@
     "type": "タイプ",
     "typePlaceholder": "タイプを選択してください",
     "refresh": "更新",
+    "retry": "再試行",
     "status": "ステータス",
     "active": "アクティブ",
     "inactive": "非アクティブ",
@@ -108,6 +109,9 @@
     "finish": "完了"
   },
   "errors": {
+    "queue": {
+      "steer_unsupported": "現在の実行にはメッセージを追加できません。終了してから新しいメッセージを送信してください。"
+    },
     "bot": {
       "name_taken": "この名前はすでに使用されています。"
     },
@@ -130,13 +134,18 @@
       "reasoning_options_unavailable": "チャットModelの推論オプションを確認できませんでした。しばらくしてからもう一度お試しください。"
     },
     "context": {
-      "budget_unsatisfied": "モデルのコンテキストウィンドウが不足しているため、このリクエストを処理できません。",
-      "protected_overflow": "必須コンテキストがモデルのコンテキスト予算を超えています。"
+      "budget_unsatisfied": "モデルのコンテキストウィンドウが不足しているため、このリクエストを処理できません。/compact で古い履歴を要約するか、リクエストを短くするか、より大きなコンテキストウィンドウのモデルをお試しください。",
+      "protected_overflow": "必須コンテキストがモデルのコンテキスト予算を超えています。/compact で古い履歴を要約するか、より大きなコンテキストウィンドウのモデルをお試しください。"
     },
     "agent": {
       "response_timeout": "モデルから時間内に応答がありませんでした。もう一度お試しください。",
       "response_interrupted": "モデルの応答が中断されました。もう一度お試しください。"
     },
+    "queue_request_invalid": "既存の会話で /steer または /queue の後に内容を入力してください。",
+    "queue_no_active_run": "現在の応答は終了しています。内容を新しいメッセージとして送信してください。",
+    "queue_admission_overloaded": "キューが混雑しています。しばらくしてから再試行してください。",
+    "queue_admission_unavailable": "キューサービスは一時的に利用できません。しばらくしてから再試行してください。",
+    "queue_item_not_pending": "このメッセージは待機中のキューにありません。",
     "profile": {
       "request_invalid": "プロフィール更新リクエストが無効です。",
       "title_model_invalid": "選択したタイトルModelは利用できないか、チャットModelではありません。",
@@ -190,9 +199,24 @@
     },
     "workspace": {
       "unreachable": "Workspace に接続できません。しばらくしてからもう一度お試しください。",
-      "image_incompatible": "Workspace イメージに互換性がありません。最新の Memoh Workspace イメージを基に再構築してください。",
       "template_bootstrap_failed": "Workspace ファイルを初期化できませんでした。Workspace を再構築してからもう一度お試しください。",
       "display_prepare_failed": "ディスプレイの準備に失敗しました。しばらくしてからもう一度お試しください。"
+    },
+    "workspace_dependency": {
+      "not_found": "この依存関係は存在しません。",
+      "request_invalid": "依存関係のリクエストが無効です。内容を確認して、もう一度お試しください。",
+      "action_unsupported": "この依存関係ではこの操作を利用できません。",
+      "platform_unsupported": "この Workspace のプラットフォームでは利用できません。",
+      "busy": "この依存関係で別の操作が進行中です。しばらくしてからもう一度お試しください。",
+      "workspace_not_running": "Workspace が起動していません。先に起動してください。",
+      "workspace_missing": "Workspace がまだ作成されていません。先に作成してください。",
+      "remote_offline": "そのコンピューターはオフラインです。",
+      "rollback_unavailable": "ロールバックできる以前のバージョンがありません。",
+      "operation_failed": "依存関係の操作に失敗しました。ログを確認して、もう一度お試しください。",
+      "catalog_unavailable": "依存関係カタログを取得できません。しばらくしてから再試行してください。",
+      "definition_invalid": "依存関係の定義を検証できませんでした。カタログを更新して再試行してください。",
+      "definition_unavailable": "この依存関係の定義はキャッシュされていません。Supermarket に接続して再試行してください。",
+      "discovery_failed": "Workspace の依存関係を確認できませんでした。再試行してください。"
     },
     "acp": {
       "request_invalid": "Agent ランタイムのリクエストが無効です。内容を確認して、もう一度お試しください。",
@@ -201,7 +225,6 @@
       "runtime_conflict": "Agent ランタイムはこの操作を実行できる状態ではありません。更新してからもう一度お試しください。",
       "runtime_limit_reached": "実行中の Agent ランタイムが多すぎます。1 つ終了してからもう一度お試しください。",
       "operation_failed": "Agent ランタイムの操作に失敗しました。もう一度お試しください。",
-      "turn_replacement_unsupported": "外部 Agent のセッションでは再試行とメッセージの編集は利用できません。代わりに新しいメッセージを送信してください。",
       "model_selection_unsupported": "この外部Agentはモデルの切り替えに対応していません。",
       "model_id_required": "モデルを選択して、もう一度お試しください。",
       "model_unavailable": "選択したモデルはこの外部Agentで利用できなくなりました。",
@@ -212,6 +235,23 @@
       "mode_id_required": "セッションモードを選択して、もう一度お試しください。",
       "mode_unavailable": "選択したセッションモードはこの外部 Agent で利用できなくなりました。",
       "config_update_failed": "外部Agentに選択した設定を適用できませんでした。もう一度お試しください。"
+    },
+    "external_agent": {
+      "turn_replacement_unsupported": "外部 Agent のセッションでは再試行とメッセージの編集は利用できません。代わりに新しいメッセージを送信してください。"
+    },
+    "agent_credential": {
+      "not_found": "この Agent アカウントは利用できません。別のアカウントを選択してください。",
+      "request_invalid": "Agent アカウントの情報を確認して、もう一度お試しください。",
+      "forbidden": "この Agent アカウントを使用する権限がありません。",
+      "incompatible": "このアカウントは選択した Agent では使用できません。",
+      "revoked": "この Agent アカウントは切断されています。再接続するか、別のアカウントを選択してください。",
+      "reauthorization_required": "この Agent アカウントを再接続してから使用してください。",
+      "encryption_unavailable": "この Server では Agent アカウントの保存が設定されていません。",
+      "runtime_busy": "現在の応答が完了してから Agent アカウントを切り替えてください。",
+      "materialization_failed": "Agent アカウントを準備できませんでした。もう一度お試しください。"
+    },
+    "session": {
+      "model_preference_conflict": "モデルの選択が別の場所で更新されました。再読み込みするか、メッセージを送信して現在の選択を適用してください。"
     },
     "session_runtime": {
       "session_busy": "このセッションはまだ前のメッセージを処理しています。しばらくしてからもう一度お試しください。",
@@ -224,6 +264,10 @@
       "access_denied": "コンテキストライフサイクルの診断情報を表示する権限がありません。",
       "not_found": "会話が見つかりませんでした。",
       "load_failed": "コンテキストライフサイクルの診断情報を読み込めませんでした。しばらくしてからもう一度お試しください。"
+    },
+    "external_runtime": {
+      "auth_required": "Codex はまだアカウントに接続されていません。Agent の設定で ChatGPT に接続するか、API Key を設定してください。",
+      "unavailable": "External Agent の Runtime を利用できません。Agent の設定と Workspace を確認して、もう一度お試しください。"
     }
   },
   "auth": {
@@ -604,8 +648,8 @@
     "emptySystemSession": "このシステムセッションにはメッセージが記録されていません",
     "selectBot": "Botを選択してください",
     "selectBotHint": "サイドバーからBotを選択してチャットを開始します",
-    "thinking": "考えています…",
-    "thinkingInProgress": "考え…",
+    "thinking": "依頼への対応を考えています",
+    "thinkingInProgress": "依頼への対応を考えています",
     "thinkingDone": "思考完了",
     "actions": {
       "copy": "コピー",
@@ -619,6 +663,7 @@
       "readAloud": "読み上げ"
     },
     "process": {
+      "starting": "リクエストに対応しています",
       "browse": "{count} ファイルを読み取る",
       "edit": "編集された {count} ファイル",
       "run": "{count} コマンドを実行しました",
@@ -631,32 +676,102 @@
       "steps": "{count} ステップ",
       "thought": "考え",
       "thoughtBriefly": "少し考えた",
-      "thoughtSeconds": "{seconds}秒考えました"
+      "thoughtSeconds": "{seconds}秒考えました",
+      "phase": {
+        "browse": {
+          "ing": "探索中",
+          "done": "探索しました"
+        },
+        "edit": {
+          "ing": "編集中",
+          "done": "編集しました"
+        },
+        "run": {
+          "ing": "実行中",
+          "done": "実行しました"
+        },
+        "message": {
+          "ing": "送信中",
+          "done": "送信しました"
+        },
+        "schedule": {
+          "ing": "変更中",
+          "done": "変更しました"
+        },
+        "media": {
+          "ing": "生成中",
+          "done": "生成しました"
+        },
+        "agent": {
+          "ing": "委譲中",
+          "done": "委譲しました"
+        },
+        "gui": {
+          "ing": "閲覧中",
+          "done": "閲覧しました"
+        },
+        "other": {
+          "ing": "作業中",
+          "done": "作業しました"
+        }
+      },
+      "frag": {
+        "fileOperations": "ファイル操作 {count} 件",
+        "searches": "{count} 件の検索",
+        "commands": "{count} コマンド",
+        "messages": "{count} 件のメッセージ",
+        "schedules": "{count} 件のスケジュール",
+        "media": "{count} 個のメディアファイル",
+        "agents": "{count} のAgent",
+        "steps": "{count} ステップ",
+        "sites": "{count} 件のサイト"
+      },
+      "fragmentSeparator": "、"
     },
     "currentBot": "現在のBot",
-    "inputPlaceholder": "質問を入力してください…",
+    "queue": {
+      "steer": "現在の応答",
+      "followUp": "次のメッセージ",
+      "mode": "送信方法",
+      "steerDescription": "次の安全なステップで現在の応答に追加",
+      "followUpDescription": "現在の応答が終わった後に自動送信",
+      "steerPlaceholder": "現在の応答に追加する内容を入力…",
+      "followUpPlaceholder": "次のメッセージを入力…",
+      "enqueueSteer": "現在の応答に追加",
+      "enqueueFollowUp": "次のメッセージに追加",
+      "steerQueued": "現在の応答キューに追加済み",
+      "steerFailed": "現在の応答に追加できませんでした。メッセージはキューに残っています。",
+      "reorder": "並べ替え",
+      "remove": "削除",
+      "switchToFollowUp": "この実行の後に追加",
+      "switchToSteer": "現在の実行に追加"
+    },
+    "inputPlaceholder": "質問を入力してください",
     "readonlyHint": "このチャットは読み取り専用です",
     "readonlyPlaceholder": "このチャットは読み取り専用です。メッセージの送信は無効になっています。",
     "composerActions": "ファイルの追加またはエージェントの切り替え",
     "voiceInput": {
       "start": "音声入力を開始",
       "stop": "録音を停止",
-      "transcribing": "文字起こし中…",
+      "transcribing": "文字起こし中",
       "notConfigured": "先に文字起こしモデルを選択してください。",
       "unsupported": "このブラウザは音声入力に対応していません。",
       "permissionDenied": "マイクへのアクセスが拒否されました。",
       "empty": "音声を認識できませんでした。",
-      "failed": "音声入力に失敗しました。"
+      "failed": "音声入力に失敗しました。",
+      "barLabel": "音声録音",
+      "cancel": "音声入力をキャンセル",
+      "confirm": "完了して文字起こし"
     },
     "agent": "エージェント",
     "continueOn": {
       "label": "続行先",
-      "addComputer": "コンピューターを追加…",
-      "manageAccess": "アクセス権を管理…",
+      "addComputer": "コンピューターを追加",
+      "manageAccess": "アクセス権を管理",
       "manageComputers": "コンピューターを管理",
       "noAccess": "この Bot にはコンピューターのアクセス権がありません"
     },
-    "computerLoading": "コンピューターを読み込み中...",
+    "computerLoading": "コンピューターを読み込み中",
     "computerLoadFailed": "コンピューターを読み込めませんでした",
     "computerUnavailable": "利用できないコンピューター",
     "folder": "フォルダ",
@@ -749,7 +864,7 @@
       "write": "書く",
       "edit": "編集",
       "apply_patch": "パッチ",
-      "list": "リスト",
+      "list": "ディレクトリ内を一覧表示",
       "list_execution_locations": "利用可能なコンピューターを確認",
       "exec": "実行",
       "exec_background": "バックグラウンドで実行",
@@ -807,15 +922,15 @@
       "list_skills": "スキルを一覧表示",
       "list_models": "モデルを一覧表示",
       "list_workdirs": "作業ディレクトリを一覧表示",
-      "list_acp_agents": "コーディングAgentを一覧表示",
-      "list_acp_agents_one": "コーディングAgentを確認",
+      "list_acp_agents": "ACP Agent を一覧表示",
+      "list_acp_agents_one": "ACP Agent を確認",
       "browser_action": "ブラウザー {action}",
       "browser_observe": "ブラウザー {action} を観察",
       "computer_observe": "デスクトップ {action} を観察",
       "computer_action": "デスクトップ {action}",
       "browser_remote_session": "ブラウザーセッション {action}",
       "browserAction": {
-        "navigate": "ナビゲート",
+        "navigate": "Web ページを開く",
         "click": "クリック",
         "double_click": "ダブルクリック",
         "focus": "フォーカス",
@@ -835,26 +950,26 @@
         "keydown": "キーを押し下げる",
         "keyup": "キーを離す",
         "drag": "ドラッグ",
-        "upload": "アップロード",
-        "wait": "待って",
-        "go_back": "戻る",
-        "go_forward": "前進します",
-        "reload": "リロード",
-        "tab_new": "新しいタブ",
-        "tab_select": "タブの切り替え",
-        "tab_close": "タブを閉じる"
+        "upload": "ページにファイルをアップロード",
+        "wait": "ブラウザーで待機",
+        "go_back": "前のページに戻る",
+        "go_forward": "次のページに進む",
+        "reload": "現在のページを再読み込み",
+        "tab_new": "ブラウザーのタブを開く",
+        "tab_select": "ブラウザーのタブを切り替え",
+        "tab_close": "ブラウザーのタブを閉じる"
       },
       "browserObserve": {
-        "snapshot": "ページのスナップショット",
-        "get_content": "コンテンツを取得する",
-        "screenshot_annotate": "注釈付きのスクリーンショット",
-        "screenshot": "スクリーンショット",
-        "get_html": "HTMLを取得",
-        "evaluate": "スクリプトを評価する",
-        "get_url": "得るURL",
-        "get_title": "タイトルの取得",
-        "pdf": "エクスポートPDF",
-        "tab_list": "タブのリスト"
+        "snapshot": "ページの構造を確認",
+        "get_content": "ページの内容を読み取り",
+        "screenshot_annotate": "注釈付きのページ画像を撮影",
+        "screenshot": "ページのスクリーンショットを撮影",
+        "get_html": "ページの HTML を読み取り",
+        "evaluate": "ブラウザーでスクリプトを実行",
+        "get_url": "現在のページの URL を読み取り",
+        "get_title": "現在のページのタイトルを読み取り",
+        "pdf": "ページを PDF に出力",
+        "tab_list": "ブラウザーのタブを一覧表示"
       },
       "computerObserve": {
         "snapshot": "デスクトップのスナップショット",
@@ -874,7 +989,7 @@
         "click_right": "右クリック",
         "click_middle": "中クリック",
         "drag": "ドラッグ",
-        "wait": "待って",
+        "wait": "コンピューターで待機",
         "mouse_move": "ポインタを移動する",
         "pointer": "ポインタ"
       },
@@ -888,32 +1003,33 @@
       "exitCode": "終了コード{code}",
       "approve": "許可する",
       "reject": "拒否する",
-    "pendingApproval": "承認待ち",
-    "executionLocation": "実行場所",
+      "pendingApproval": "承認待ち",
+      "executionLocation": "実行場所",
       "pendingUserInput": "入力を待っています",
       "userInputSubmitted": "答えた",
       "userInputCanceled": "キャンセル",
       "userInputFailed": "失敗した",
       "userInputExpired": "期限切れ",
       "userInputPlaceholder": "答え",
-      "userInputCustomOption": "他の…",
-      "userInputTellMore": "Bot にもっと伝える…",
+      "userInputCustomOption": "他の",
+      "userInputTellMore": "Bot にもっと伝える",
       "submitUserInput": "送信",
       "cancelUserInput": "キャンセル",
       "userInputConnectionLost": "接続が失われました。再接続してもう一度お試しください。",
       "pending": {
-        "generic": "処理中…",
-        "write": "ファイルを書き込み中…",
-        "edit": "編集…",
-        "apply_patch": "パッチを適用中…"
+        "generic": "次の手順を準備しています",
+        "write": "ファイルを書き込み中",
+        "edit": "ファイルを編集中",
+        "apply_patch": "パッチを適用中"
       },
       "detail": {
+        "failed": "ツールの実行に失敗しました。",
         "openInFiles": "ファイルで開く",
         "input": "入力",
         "result": "結果",
         "noData": "データなし",
         "noOutput": "出力なし",
-        "waitingOutput": "出力を待っています…",
+        "waitingOutput": "出力を待っています",
         "noChanges": "変更なし",
         "noContent": "コンテンツなし",
         "contentTruncated": "プレビューが切り詰められました。完全な書き込みサイズ: {bytes} バイト。",
@@ -993,13 +1109,13 @@
     "sessionModeCaution": "セッションモードを切り替えると、外部 Agent が実行できる操作が変わる場合があります。ツールの承認は別途必要です。",
     "sessionModeChanged": "セッションモードを切り替えました。ツールの承認は引き続き別途必要です。",
     "noModels": "利用可能なモデルはありません",
-    "defaultACPLoading": "デフォルトAgentはまだ読み込み中です。少し待ってからもう一度お試しください。",
-    "defaultACPNoWorkspaceExec": "デフォルトAgentは有効ですが、Workspaceコマンドを実行する権限がありません。",
-    "defaultACPAgentMissing": "デフォルトAgentは有効ですが、Agentが選択されていません。",
-    "defaultACPAgentUnavailable": "デフォルトAgentは有効ですが、選択されたAgentを利用できません。",
-    "defaultACPAgentDisabled": "デフォルトAgentは有効ですが、選択されたAgentは無効です。",
-    "defaultACPAgentNotConfigured": "デフォルトAgentは有効ですが、選択されたAgentの設定が完了していません。",
-    "acp": {
+    "defaultExternalAgentLoading": "デフォルトAgentはまだ読み込み中です。少し待ってからもう一度お試しください。",
+    "defaultAgentNoWorkspaceExec": "デフォルトAgentは有効ですが、Workspaceコマンドを実行する権限がありません。",
+    "defaultAgentMissing": "デフォルトAgentは有効ですが、Agentが選択されていません。",
+    "defaultAgentUnavailable": "デフォルトAgentは有効ですが、選択されたAgentを利用できません。",
+    "defaultAgentDisabled": "デフォルトAgentは有効ですが、選択されたAgentは無効です。",
+    "defaultAgentNotConfigured": "デフォルトAgentは有効ですが、選択されたAgentの設定が完了していません。",
+    "externalAgent": {
       "agentNotConfigured": "このBotの外部Agent設定が完了していません。",
       "agentCommandStale": "Agentはこのコマンドを提供しなくなりました。コマンドピッカーを開き直して再試行してください。",
       "agentNotFound": "選択された外部Agentは利用できません。",
@@ -1019,7 +1135,12 @@
       "attachmentInvalid": "添付ファイルは無効です。もう一度添付してください。",
       "attachmentUnavailable": "外部Agentが添付ファイルにアクセスできません。もう一度添付してください。",
       "imageInputUnsupported": "この外部Agentは添付画像を読み取れません。",
-      "invalidChatRuntime": "選択されたチャットruntimeが無効です。"
+      "invalidChatRuntime": "選択されたチャットruntimeが無効です。",
+      "dependencyMissing": "{dep_id} はこの Workspace にインストールされていません。バックグラウンドでインストール中です。完了後にメッセージを再送してください。",
+      "dependencyMissingProgress": "バックグラウンドでインストール中…",
+      "dependencyMissingDone": "インストール完了。再送できます。",
+      "dependencyMissingFailed": "バックグラウンドのインストールに失敗しました。Bot 設定の「依存関係」から再試行してください。",
+      "dependencyOpen": "依存関係を開く"
     },
     "sessionFilterAll": "全て",
     "searchSessionPlaceholder": "検索",
@@ -1035,14 +1156,72 @@
     "infoContextUsage": "コンテキストの使い方",
     "infoContextTokens": "{used} / {window}",
     "infoContextTokensNoWindow": "{used} / --",
+    "infoContextTokensEstimate": "~{used} / {window}",
+    "infoContextTokensEstimateNoWindow": "~{used} / --",
+    "infoAutoCompactAt": "自動圧縮しきい値 ~{tokens}",
+    "contextBreakdown": {
+      "system": "システムプロンプト",
+      "rules": "ワークスペースルール",
+      "tools": "ツール",
+      "skills": "スキル",
+      "memory": "メモリ",
+      "summary": "サマリー",
+      "conversation": "会話",
+      "other": "その他",
+      "reserve": "出力リザーブ",
+      "free": "空き容量"
+    },
+    "lifecycle": {
+      "title": "コンテキストインスペクター",
+      "aggTurns": "ターン",
+      "aggCacheRead": "キャッシュ読取",
+      "aggCacheWrite": "キャッシュ書込",
+      "statusCompleted": "完了",
+      "statusFallback": "フォールバック",
+      "statusFailedBudget": "バジェット失敗",
+      "statusFailedProvider": "プロバイダー失敗",
+      "statusAborted": "中断",
+      "composition": "構成",
+      "selection": "選択",
+      "selectedCount": "選択 {n}",
+      "droppedCount": "破棄 {n}",
+      "truncatedCount": "切詰め {n}",
+      "dropReasons": "破棄理由",
+      "trust": "トラスト",
+      "trustSystem": "システム",
+      "trustWorkspace": "ワークスペース",
+      "trustUser": "ユーザー",
+      "trustExternal": "外部",
+      "unknown": "不明",
+      "mutations": "ミューテーション",
+      "steps": "ステップ",
+      "window": "ウィンドウ",
+      "stablePrefix": "安定プレフィックス",
+      "cacheRead": "キャッシュ読取",
+      "cacheWrite": "キャッシュ書込",
+      "empty": "このセッションのライフサイクルデータはまだありません",
+      "loadFailed": "ライフサイクルデータの読み込みに失敗しました",
+      "trimmedCount": "トリム {n}",
+      "diffInitial": "最初のターン",
+      "diffTools": "ツール変更",
+      "diffSystem": "システム変更",
+      "diffSystemTools": "システムとツール変更",
+      "diffHistory": "履歴のみ",
+      "aggScope": "このページ内",
+      "moreTurns": "このページより古いターンがあります",
+      "loadOlder": "最大 {n} ターンを読み込む",
+      "legacySource": "旧メッセージメタデータから復元"
+    },
     "infoCacheHitRate": "キャッシュヒット率",
     "infoCacheRead": "キャッシュ読み取り",
+    "infoProviderInput": "プロバイダー入力",
     "infoSubagents": "サブエージェント",
     "infoSkills": "スキル",
     "infoNoSkills": "このセッションではスキルは使用されていません",
     "infoNoData": "利用可能なデータがありません",
     "compactNow": "今すぐコンパクトに",
     "compactSuccess": "コンテキストの圧縮が完了しました",
+    "compactingContext": "コンテキストを圧縮中…",
     "compactFailed": "コンテキストの圧縮に失敗しました",
     "sessionStreaming": "生成中",
     "slash": {
@@ -1135,6 +1314,7 @@
     "openPreviewToSide": "プレビューを横に開く",
     "previewTab": "プレビュー: {name}",
     "sessionInfoRingAria": "セッション情報",
+    "sessionInfoRingAriaUsage": "セッション情報、コンテキスト使用率 {percent}%",
     "sessionInfoTooltipHint": "カーソルを合わせるとセッション情報が表示されます",
     "sessionActions": "セッションアクション",
     "tabBarToolkit": {
@@ -1156,7 +1336,7 @@
       "go": "移動",
       "refresh": "リフレッシュ",
       "status": {
-        "connecting": "ブラウザーに接続しています...",
+        "connecting": "ブラウザーに接続しています",
         "connected": "ブラウザーに接続しました",
         "expired": "ブラウザーセッションの有効期限が切れました",
         "error": "ブラウザーを使用できません"
@@ -1168,8 +1348,8 @@
       "closeSession": "デスクトップセッションを閉じる",
       "status": {
         "idle": "デスクトップは待機中です",
-        "connecting": "デスクトップに接続しています...",
-        "buffering": "映像ストリームを開始しています...",
+        "connecting": "デスクトップに接続しています",
+        "buffering": "映像ストリームを開始しています",
         "connected": "デスクトップに接続しました",
         "disconnected": "デスクトップの接続が切断されました",
         "unavailable": "デスクトップを使用できません",
@@ -1223,7 +1403,8 @@
         "jitter": "ジッター",
         "rtt": "RTT"
       }
-    }
+    },
+    "modelDefaultNamed": "デフォルト（{model}）"
   },
   "models": {
     "title": "モデル",
@@ -1772,27 +1953,27 @@
       "resetDefaults": "デフォルトにリセット",
       "confirmReset": "すべてのツール承認ルールをデフォルト状態に戻しますか?",
       "resetWarningExtra": "カスタムのバイパスルールとレビュー必須ルールは失われます。",
-    "title": "ツール呼び出しの承認",
-    "intro": "この Bot が Workspace と各接続済みコンピューターで実行できる操作を設定します。",
-    "loading": "承認ルールを読み込んでいます...",
-    "loadFailed": "Tool の承認設定を読み込めませんでした",
+      "title": "ツール呼び出しの承認",
+      "intro": "この Bot が Workspace と各接続済みコンピューターで実行できる操作を設定します。",
+      "loading": "承認ルールを読み込んでいます...",
+      "loadFailed": "Tool の承認設定を読み込めませんでした",
       "loadFailedDescription": "Server への接続を確認して、もう一度お試しください。",
-    "saveFailed": "Tool の承認設定を保存できませんでした",
-    "enabled": "Tool の承認",
-    "enabledDescription": "この場所では許可、確認、拒否のルールが適用されます。",
-    "disabledDescription": "ファイルとコマンドの Tool は直接実行されます。保存済みのモードとルールは保持されます。",
-    "target": {
-      "title": "承認対象",
-      "label": "Workspace またはコンピューター",
-      "description": "ルールは選択した Workspace またはコンピューターにのみ適用されます。"
-    },
-    "modes": {
-      "allow": "許可",
-      "ask": "確認",
-      "deny": "拒否"
+      "saveFailed": "Tool の承認設定を保存できませんでした",
+      "enabled": "Tool の承認",
+      "enabledDescription": "この場所では許可、確認、拒否のルールが適用されます。",
+      "disabledDescription": "ファイルとコマンドの Tool は直接実行されます。保存済みのモードとルールは保持されます。",
+      "target": {
+        "title": "承認対象",
+        "label": "Workspace またはコンピューター",
+        "description": "ルールは選択した Workspace またはコンピューターにのみ適用されます。"
       },
-    "rules": {
-      "title": "ツールルール",
+      "modes": {
+        "allow": "許可",
+        "ask": "確認",
+        "deny": "拒否"
+      },
+      "rules": {
+        "title": "ツールルール",
         "reset": "推奨設定にリセット"
       },
       "behavior": {
@@ -1808,15 +1989,15 @@
         "pathsTitle": "常にレビューを要求",
         "commandsTitle": "常にレビューを要求"
       },
-    "toolNames": {
-      "read": "ファイル読み取り",
-      "write": "ファイル書き込み",
-      "exec": "シェルコマンド"
-    },
-    "tools": {
-      "read": "ワークスペース内のファイルを読み取り、ディレクトリを一覧表示する",
-      "write": "ワークスペース内でファイルの書き込み、編集、patch の適用を行う",
-      "exec": "Workspace 内でシェルコマンドを実行する"
+      "toolNames": {
+        "read": "ファイル読み取り",
+        "write": "ファイル書き込み",
+        "exec": "シェルコマンド"
+      },
+      "tools": {
+        "read": "ワークスペース内のファイルを読み取り、ディレクトリを一覧表示する",
+        "write": "ワークスペース内でファイルの書き込み、編集、patch の適用を行う",
+        "exec": "Workspace 内でシェルコマンドを実行する"
       },
       "toolDisabledHint": "この操作では現在、承認は要求されていません。以下のルールは、スイッチを有効にした後に適用されます。",
       "bypass": "バイパス (許可リスト)",
@@ -1884,12 +2065,10 @@
       "basicInfoDesc": "名前とアバター",
       "workspace": "Workspace",
       "workspaceDesc": "分離 Workspace",
-      "security": "セキュリティポリシー",
       "securityDesc": "アクセス制御",
       "model": "Model",
       "modelDesc": "チャット Modelを選択します (オプション)",
       "agent": "エージェント",
-      "agentDesc": "ホステッドエージェントは独自のモデルを使用します。",
       "memory": "Memory",
       "memoryDesc": "MemoryProvider (オプション)",
       "settings": "設定",
@@ -1898,7 +2077,8 @@
     "agentCreate": {
       "typeAriaLabel": "エージェントの種類",
       "oauthSettingsHint": "認可は作成後に行います。Bot の設定でいつでも完了できます。",
-      "requiredError": "「{field}」を入力してください"
+      "requiredError": "「{field}」を入力してください",
+      "directSetupHint": "Codex と Claude Code はここでの設定は不要です。作成後に Bot の設定ページでサインインまたは API Key を設定してください。"
     },
     "createBotLocalHint": "ローカル Botはこのコンピューター上のフォルダーを使用し、サンドボックス化されていません。",
     "create": {
@@ -1943,7 +2123,7 @@
     "timezonePlaceholder": "例: America/New_York",
     "timezoneInherited": "ユーザー/システムから継承",
     "timezoneInheritedHint": "ユーザーのタイムゾーンを継承する場合は空のままにするか、システムのタイムゾーンにフォールバックします。",
-    "aclPreset": "セキュリティポリシー",
+    "aclPreset": "IM アプリポリシー",
     "aclPresetDescription": "標準から始めるACLプリセット。後でChannel アクセスで調整できます。",
     "aclPresetHint": "ヒント: 個人Botには「プライベートのみ」を使用し、コミュニティBotには「グループのみ」または「グループとスレッド」を使用し、完全にオープンなままにする場合は「すべてを許可」を使用します。",
     "aclPresetHelp": "これでデフォルトが設定されますACL効果と初期ルール。これらは、[Channel アクセス] ページでいつでも調整できます。",
@@ -2126,12 +2306,13 @@
       "desktop": "Desktop",
       "toolApproval": "Toolの承認",
       "hooks": "Hooks",
-      "acp": "エージェント",
+      "agents": "エージェント",
       "network": "ネットワーク",
       "memory": "メモリ",
       "channels": "プラットフォーム",
       "remoteRuntime": "コンピューター",
       "container": "Workspace",
+      "dependencies": "依存関係",
       "mcp": "MCP",
       "compaction": "圧縮",
       "schedule": "スケジュール",
@@ -2155,14 +2336,163 @@
       "namePlaceholder": "Agent 名を入力",
       "nameRequired": "Agent 名を入力してください。",
       "emptyTitle": "Agent はまだありません",
-      "emptyDescription": "Agent を追加すると、この Bot で Codex、Claude Code、Hermes を利用できます。",
+      "emptyDescription": "Agent を追加すると、この Bot で Codex、Claude Code、またはカスタム ACP Agent を利用できます。",
       "statusNeedsConfig": "設定が必要",
       "statusOff": "無効",
       "deleteTitle": "Agent を削除しますか？",
       "deleteDescription": "「{name}」を削除しますか？既存の会話は関連付けを維持しますが、新しい会話では選択できなくなります。",
       "deleted": "Agent を削除しました",
       "deleteFailed": "Agent を削除できませんでした",
-      "nameDescription": "選択画面や会話で Agent を識別する名前です。"
+      "nameDescription": "選択画面や会話で Agent を識別する名前です。",
+      "runtimeSetup": "Runtime の設定",
+      "authMode": "認証方法",
+      "authChatGPT": "ChatGPT アカウント",
+      "authWorkspace": "Workspace の認証情報",
+      "authOAuthToken": "OAuth Token",
+      "authChatGPTDescription": "ChatGPT のサブスクリプションアカウントで Codex を認証します。",
+      "authWorkspaceDescription": "この Bot の Workspace に保存済みの Claude Code ログインを使用します。",
+      "authOAuthTokenDescription": "Claude Code の setup-token で作成した OAuth Token を使用します。",
+      "authApiKeyDescription": "Memoh に保存し、Runtime に渡す API Key を使用します。",
+      "apiKey": "API Key",
+      "apiKeyDescription": "API Key は暗号化して保存され、Runtime でのみこの Agent に渡されます。",
+      "oauthToken": "OAuth Token",
+      "oauthTokenDescription": "Claude Code の setup-token で作成した Token を貼り付けます。",
+      "defaultModel": "デフォルトモデル",
+      "defaultModelDescription": "任意項目です。空欄の場合は External Agent のデフォルトを使用し、会話中に一時的に変更できます。",
+      "defaultModelPlaceholder": "Runtime のデフォルトを使用",
+      "account": "アカウント",
+      "chatgptAccount": "ChatGPT アカウント",
+      "chatgptAccountDescription": "Memoh はこの Agent の ChatGPT 認証情報を暗号化して保存し、Runtime でのみ Codex に渡します。",
+      "chatgptAccountConnectedDescription": "この Agent の ChatGPT 認証情報は暗号化して保存されています。",
+      "reconnect": "再接続",
+      "codexDeviceHint": "認証ページを開き、このワンタイムコードを入力してください。表示された OpenAI の認証ページ以外には入力しないでください。Memoh が認証を自動で完了します。",
+      "codexLoginSuccess": "Codex を ChatGPT アカウントに接続しました",
+      "codexLoginFailed": "Codex アカウントを認証できませんでした。もう一度お試しください。",
+      "modelsLoadFailed": "Agent のモデルを読み込めませんでした。Agent の設定を確認して、もう一度お試しください。",
+      "openSettings": "Agent の設定を開く",
+      "dependencyChecking": "依存関係を確認中…",
+      "dependencyRemoteOffline": "この Bot が接続しているコンピューターはオフラインです。オンラインになると依存関係を確認できます。",
+      "dependencyInstalledEnableHint": "{name} をインストールしました。Agent を有効にすると使用できます。"
+    },
+    "dependencies": {
+      "title": "Workspace の依存関係",
+      "intro": "この Bot の Workspace にインストール済みのコマンドラインツールとランタイムです。新しい依存関係は Supermarket から追加します。",
+      "checkUpdates": "更新を確認",
+      "checkUpdatesDone": "更新の確認が完了しました",
+      "lastChecked": "最終確認：{time}",
+      "emptyTitle": "この Workspace にはまだ何もインストールされていません",
+      "emptyAction": "Supermarket から追加",
+      "loadFailed": "依存関係を読み込めませんでした",
+      "close": "閉じる",
+      "status": {
+        "installed": "インストール済み",
+        "notInstalled": "未インストール",
+        "missing": "再インストールが必要",
+        "failed": "失敗",
+        "installing": "インストール中",
+        "updating": "更新中",
+        "removing": "削除中",
+        "updateAvailable": "{version} が利用可能",
+        "unsupported": "非対応",
+        "unsupportedTooltip": "この Workspace のプラットフォームでは利用できません。"
+      },
+      "action": {
+        "install": "インストール",
+        "reinstall": "再インストール",
+        "update": "更新",
+        "rollback": "{version} にロールバック",
+        "rollbackPlain": "ロールバック",
+        "remove": "削除",
+        "viewScript": "スクリプトを表示",
+        "viewProgress": "進行状況を表示"
+      },
+      "workspace": {
+        "notRunningTitle": "Workspace が起動していません",
+        "notRunningDescription": "インストール・更新・状態の検出には Workspace の起動が必要です。表示は最後に記録された状態です。",
+        "start": "Workspace を起動",
+        "missingTitle": "Workspace がまだありません",
+        "goToContainer": "Workspace タブを開く",
+        "remoteOfflineTitle": "「{name}」はオフラインです",
+        "remoteOfflineDescription": "オンラインになると依存関係を管理できます。",
+        "discoveryErrorTitle": "Workspace 内の依存関係を今すぐ検出できません",
+        "discoveryErrorRetry": "再試行"
+      },
+      "confirm": {
+        "installTitle": "{name} をインストール",
+        "reinstallTitle": "{name} を再インストール",
+        "updateTitle": "{name} を更新",
+        "updateDescription": "現在は {from} です。新しいバージョンを先にインストールし、成功した場合のみ切り替えます。失敗しても現在のバージョンには影響せず、後からロールバックできます。",
+        "installDescription": "Workspace に {name} をダウンロードしてインストールします。",
+        "reinstallDescription": "現在の {name} を削除して再インストールします。完了するまで、これに依存する Agent は起動できません。",
+        "dependency": "依存関係",
+        "installPath": "インストール先",
+        "version": "バージョン",
+        "versionPlaceholder": "最新バージョン",
+        "versionHelp": "空欄のままにすると最新バージョンをインストールします。",
+        "remoteWarningTitle": "お使いのコンピューター「{name}」で実行されます",
+        "remoteWarningDescription": "スクリプトはそのコンピューター上でファイルをダウンロードして書き込みます。",
+        "installConfirm": "インストール",
+        "updateConfirm": "更新",
+        "installAndEnable": "インストールして有効化"
+      },
+      "progress": {
+        "installing": "{name} をインストール中",
+        "updating": "{name} を更新中",
+        "reinstalling": "{name} を再インストール中",
+        "removing": "{name} を削除中",
+        "preparing": "準備中…",
+        "doneTitle": "完了",
+        "failedTitle": "操作に失敗しました",
+        "failedHint": "失敗として記録されました。依存関係の一覧から再試行できます。ログはコピーできます。",
+        "runInBackground": "バックグラウンドで実行",
+        "version": "バージョン",
+        "entrypoint": "エントリーポイント"
+      },
+      "script": {
+        "title": "Workspace で実行されるスクリプト",
+        "description": "{name} · {action} · 実際に実行される内容と同一",
+        "digest": "ダイジェスト",
+        "exec": "実行方法",
+        "timeout": "タイムアウト",
+        "timeoutValue": "{seconds} 秒",
+        "env": "環境変数（{count}）",
+        "revision": "定義リビジョン"
+      },
+      "remove": {
+        "title": "{name} を削除しますか？",
+        "description": "{path} 以下のすべてのバージョンを削除します。これに依存する Agent は再インストールまで起動できません。",
+        "overlayDescription": "{installed} を削除し、Workspace は {image_version} に戻ります。"
+      },
+      "rollback": {
+        "title": "{name} をロールバック",
+        "description": "{from} から {to} に戻します。ローカルに保持されたバージョンへ切り替えるだけで、ダウンロードは行いません。",
+        "current": "現在",
+        "target": "戻す先",
+        "confirm": "{to} にロールバック",
+        "success": "{to} にロールバックしました",
+        "failed": "ロールバックに失敗しました"
+      },
+      "preflight": {
+        "failed": "依存関係を確認できませんでした",
+        "workspaceNotRunningTitle": "まず Workspace を起動してください",
+        "workspaceNotRunningDescription": "{name} を有効にするには、起動中の Workspace に依存関係をインストールする必要があります。",
+        "workspaceMissingTitle": "まず Workspace を作成してください",
+        "startAndContinue": "起動して続行",
+        "platformUnsupported": "この Workspace のプラットフォームでは {name} を利用できません"
+      },
+      "done": "完了",
+      "errorDetails": "エラーの詳細",
+      "checkUpdatesFailed": "更新を確認できませんでした",
+      "background": {
+        "installed": "{name} をインストールしました",
+        "updated": "{name} を更新しました",
+        "reinstalled": "{name} を再インストールしました",
+        "removed": "{name} を削除しました",
+        "failed": "{name} の操作に失敗しました"
+      },
+      "busy": "この Workspace では別の依存関係の操作がまだ実行中です。",
+      "catalogStaleTitle": "キャッシュされた依存関係を表示中",
+      "catalogStaleDescription": "Supermarket に接続できません。再試行して最新のカタログを取得できます。"
     },
     "folders": {
       "create": "新しいフォルダ",
@@ -2602,48 +2932,11 @@
       "acpSetupMode": "設定",
       "acpLaunchSection": "起動設定",
       "acpCommand": "コマンド",
-      "acpCommandHelp": "Workspace 内で利用できる実行ファイル名または絶対パスです。",
       "acpArguments": "起動引数",
-      "acpArgumentsHelp": "任意です。1 行に 1 つの引数を入力してください。各行は Shell で解析せず、そのまま個別の引数として渡されます。",
       "acpSetupApiKey": "APIキー",
       "acpSetupOAuth": "OAuth",
-      "acpSetupChatGPT": "チャットGPT",
-      "acpSetupClaude": "クロード",
       "acpSetupSelf": "自己管理",
-      "acpAuthType": "認証",
-      "acpAuthApiKey": "APIキー",
-      "acpAuthChatGPT": "ChatGPTアカウント",
-      "acpProvider": "OpenAI コーデックス Provider",
-      "acpProviderPlaceholder": "Providerを選択してください",
-      "acpProviderRequired": "OpenAI Codex Providerを選択して承認します。",
-      "acpCreateAndAuthorize": "作成と承認",
-      "acpOAuthAuthorize": "承認する",
-      "acpOAuthUnavailable": "Codex 認証を現在のWorkspaceに書き込むことができません。",
-      "acpCodexAccount": "ChatGPT アカウント",
-      "acpClaudeAccount": "Claude アカウント",
-      "acpCodexConnectHint": "ChatGPT アカウントでログインすると、この Bot が Codex を使えます。",
-      "acpClaudeConnectHint": "Claude アカウントでログインすると、この Bot が Claude Code を使えます。",
-      "acpOAuthReconnect": "再接続",
-      "acpCodexDeviceHint": "検証ページを開き、このワンタイムコードを入力してください。このコードは表示された OpenAI の検証URLにのみ入力してください。デバイスコードはフィッシングに悪用される可能性があります。Memoh が自動的に認証を完了します。",
-      "acpCodexDeviceExpired": "デバイスコードの有効期限が切れました。もう一度開始してください。",
-      "acpCodexDeviceFailed": "デバイス認証に失敗しました。もう一度お試しください。",
-      "acpClaudeOAuthUnavailable": "クロード コード認証を現在のWorkspaceに保存できません。",
-      "acpClaudeOAuthCodeHint": "サインイン後にクロードが表示する認証コードを貼り付けます。",
-      "acpClaudeOAuthCodePlaceholder": "認証コード",
-      "acpClaudeOAuthCodeRequired": "クロード認証コードを貼り付けます。",
-      "acpClaudeOAuthExchange": "Tokenの保存",
-      "acpClaudeOAuthExchangeFailed": "クロードTokenの保存に失敗しました",
       "acpSelfModeHint": "Workspace ランタイム内ですでに設定されている Agent（既存のログインなど）を使用します。",
-      "acpHermesSelfModeHint": "この Workspace で構成済みの Hermes Profile を使用します。Memoh で Bot の認証情報を管理する場合は API Key 設定を使用してください。",
-      "acpHermesSelfModeConfirm": "自己管理の Hermes を使用",
-      "acpHermesProviderPlaceholder": "Providerを選択",
-      "acpHermesProviderGemini": "Gemini（Google AI Studio）",
-      "acpHermesProviderOpenRouter": "OpenRouter",
-      "acpHermesProviderOpenAI": "OpenAI API",
-      "acpHermesProviderCustom": "カスタムエンドポイント",
-      "acpHermesModelPlaceholder": "Modelを選択",
-      "acpHermesCustomModel": "カスタムModel ID",
-      "acpHermesCustomModelPlaceholder": "Model IDを入力",
       "acpRequiredField": "{agent} には {field} が必要です。",
       "toolApprovalBypass": "バイパス",
       "toolApprovalMustReview": "要検討",
@@ -2712,7 +3005,16 @@
       "save": "設定の保存",
       "dangerZone": "危険な操作",
       "deleteBotDescription": "このBotを削除すると元に戻すことはできません。慎重に作業を進めてください。",
-      "deleteBot": "Botの削除"
+      "deleteBot": "Botの削除",
+      "agentCredentialSecret": "API キー",
+      "agentCredentialSecretPlaceholder": "API キーを入力",
+      "agentCredentialSave": "保存",
+      "agentCredentialReplace": "キーを差し替える",
+      "agentCredentialSaved": "API キーを保存しました",
+      "agentCredentialConnected": "API キー接続済み",
+      "agentCredentialConnectedHint": "この Agent は専用のキーを使用します。新しいキーを保存すると置き換えられます。",
+      "agentCredentialDisconnect": "切断",
+      "agentCredentialDisconnectConfirm": "この Agent の認証情報を切断しますか?"
     },
     "access": {
       "title": "アクセス制御",
@@ -3142,14 +3444,14 @@
         "session": "セッション",
         "sessionPlaceholder": "セッションを選択",
         "sessionRuntimeNative": "このセッションは内蔵モデルランタイムを使用し、フォルダを引き継ぎます。",
-        "sessionRuntimeAcp": "このセッションは {agent} で実行され、フォルダを引き継ぎます。",
+        "sessionRuntimeAgent": "このセッションは {agent} で実行され、フォルダを引き継ぎます。",
         "model": "モデル",
         "botDefault": "Bot デフォルト",
         "pickModel": "モデルを選択",
         "noBotDefaultModel": "この Bot にはデフォルトモデルがないため、ここで選んだモデルでタスクを実行します。",
         "noModelAvailable": "この Bot にはデフォルトモデルがなく、選択できるチャットモデルもありません。先に追加してください。",
         "sessionDefault": "セッションのデフォルト",
-        "acpAgents": "コーディング Agent",
+        "externalAgents": "External Agent",
         "agentDefaultModel": "Agent デフォルト",
         "loadingAgentModels": "Agent を起動してモデルを取得中…",
         "agentModelsFailed": "Agent のモデルを取得できませんでした",
@@ -3304,13 +3606,18 @@
     "skillsSection": "スキル",
     "packagesSection": "Package",
     "connectorsSection": "コネクター",
+    "dependenciesSection": "依存関係",
     "noResults": "結果が見つかりませんでした",
     "noPackageResults": "Package が見つかりません",
     "noConnectorResults": "コネクターが見つかりません",
+    "noDependencyResults": "依存関係が見つかりません",
     "install": "インストール",
     "installToBot": "Botにインストールする",
     "selectBot": "Botを選択してください",
     "selectBotPlaceholder": "インストールするBotを選択してください...",
+    "selectWorkspaceTarget": "Workspace",
+    "dependencyInstallTitle": "{name} をインストール",
+    "viewBotDependencies": "Bot の依存関係を表示",
     "envVariables": "環境変数",
     "envDescription": "必要な環境変数を構成する",
     "installSuccess": "正常にインストールされました",
@@ -3461,6 +3768,7 @@
       "title": "最初のBotを作成する",
       "placeholder": "Botの作成は近日開始予定です。",
       "preparingEnvironment": "環境を準備しています...",
+      "randomName": "ランダムに名前をつける",
       "model": {
         "selectPlaceholder": "モデルを選択してください",
         "hint": "Bot が応答に使用するモデルを選択します。推奨項目ですが、設定でいつでも変更できます。",
@@ -3469,22 +3777,7 @@
         "retry": "再試行"
       },
       "acp": {
-        "deferredHint": "認可は、Bot とワークスペースの準備ができた後の次のステップで行われます。",
-        "oauthTitle": "{agent}を承認する",
-        "oauthAuthorized": "認可された",
-        "oauthNotAuthorized": "まだ認可されていません",
-        "oauthDescription": "認可されると、{agent} はこの Bot のワークスペース内で実行できるようになります。後で Bot 設定で認証をスキップまたは終了することもできます。",
-        "oauthAuthorizeChatGPT": "ChatGPT でサインインする",
-        "oauthAuthorizeClaude": "クロードでサインイン",
-        "oauthDeviceHint": "検証ページを開き、このワンタイムコードを入力してください。このコードは表示された OpenAI の検証URLにのみ入力してください。デバイスコードはフィッシングに悪用される可能性があります。Memoh が自動的に認証を完了します。",
-        "oauthDeviceExpired": "デバイスコードの有効期限が切れました。もう一度開始してください。",
-        "oauthDeviceFailed": "デバイス認証に失敗しました。もう一度お試しください。",
-        "oauthCodeHint": "ポップアップでサインインした後、認証コードをコピーして下に貼り付けます。",
-        "oauthCodePlaceholder": "認証コードを貼り付けます",
-        "oauthExchange": "提出する",
-        "oauthSkip": "今のところスキップしてください",
-        "oauthSuccess": "認可成功",
-        "oauthExchangeFailed": "認証に失敗しました。もう一度お試しください。"
+        "deferredHint": "認可は、Bot とワークスペースの準備ができた後の次のステップで行われます。"
       }
     },
     "im": {

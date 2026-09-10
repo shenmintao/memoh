@@ -15,6 +15,7 @@ import {
   pickString,
   skillActivationTextFromRaw,
   sortChatMessages,
+  stringRecord,
   structuredToolResult,
 } from './chat-list.normalize'
 import type { ChatMessage, ChatUserTurn } from './chat-list'
@@ -73,6 +74,13 @@ describe('record pickers', () => {
     expect(pickRawString({ a: '  ', b: 'x' }, 'a', 'b')).toBe('  ')
   })
 
+  it('stringRecord keeps only string entries and collapses to undefined', () => {
+    expect(stringRecord({ dep_id: 'codex', install_task_id: '', count: 2, nested: { a: 1 } }))
+      .toEqual({ dep_id: 'codex', install_task_id: '' })
+    expect(stringRecord({ count: 2 })).toBeUndefined()
+    expect(stringRecord(undefined)).toBeUndefined()
+  })
+
   it('structuredToolResult prefers structuredContent when non-empty', () => {
     expect(structuredToolResult({ structuredContent: { v: 1 }, other: 2 })).toEqual({ v: 1 })
     expect(structuredToolResult({ structured_content: { v: 2 }, other: 3 })).toEqual({ v: 2 })
@@ -106,6 +114,14 @@ describe('sortChatMessages', () => {
     const sorted = sortChatMessages(items)
     expect(sorted.map(m => m.id)).toEqual(['a', 'c', 'b'])
     expect(items.map(m => m.id)).toEqual(['b', 'a', 'c'])
+  })
+
+  it('keeps the request before the reply inside one turn when timestamps tie', () => {
+    const items = [
+      { id: 'runtime-assistant', role: 'assistant', turnId: 'turn-1', turnPosition: 3, messages: [], timestamp: '2026-07-09T00:00:01.000Z', streaming: false },
+      { id: 'runtime-user', role: 'user', turnId: 'turn-1', turnPosition: 3, text: 'hi', timestamp: '2026-07-09T00:00:01.000Z', streaming: false },
+    ] as ChatMessage[]
+    expect(sortChatMessages(items).map(m => m.role)).toEqual(['user', 'assistant'])
   })
 })
 

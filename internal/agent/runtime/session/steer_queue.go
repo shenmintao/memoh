@@ -112,7 +112,9 @@ func (m *Manager) dispatchSteerQueue(ctx context.Context, handle RunHandle) {
 			return snapshot, true, nil
 		}
 		return snapshot, false, nil
-	}, func(snapshot Snapshot) RuntimeDelta { return runtimeRunPatch(snapshot, false, false, true, false) })
+	}, func(snapshot Snapshot) RuntimeDelta {
+		return legacyRuntimeRunPatch(snapshot, false, false, true, false)
+	})
 	if err != nil || !changed {
 		return
 	}
@@ -156,7 +158,9 @@ func (m *Manager) takeSteerBatch(ctx context.Context, handle RunHandle, tokenID 
 		run.UpdatedAt = now
 		syncLatestSteer(run)
 		return snapshot, true, nil
-	}, func(snapshot Snapshot) RuntimeDelta { return runtimeRunPatch(snapshot, false, false, true, false) })
+	}, func(snapshot Snapshot) RuntimeDelta {
+		return legacyRuntimeRunPatch(snapshot, false, false, true, false)
+	})
 	if err != nil || !changed {
 		return turn.InjectMessage{}, false
 	}
@@ -206,5 +210,7 @@ func (m *Manager) finishSteerBatch(ctx context.Context, handle RunHandle, ids []
 			syncLatestSteer(run)
 		}
 		return snapshot, changed, nil
-	}, func(snapshot Snapshot) RuntimeDelta { return runtimeRunPatch(snapshot, false, false, true, false) })
+	}, func(snapshot Snapshot) RuntimeDelta {
+		return legacyRuntimeRunPatch(snapshot, false, false, true, false)
+	})
 }

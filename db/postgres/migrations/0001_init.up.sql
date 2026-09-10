@@ -233,7 +233,7 @@ CREATE TABLE IF NOT EXISTS bots (
   command_ui_language TEXT NOT NULL DEFAULT 'auto',
   reasoning_effort TEXT NOT NULL DEFAULT 'medium',
   chat_model_id UUID REFERENCES models(id) ON DELETE SET NULL,
-  chat_runtime TEXT NOT NULL DEFAULT 'model' CHECK (chat_runtime IN ('model', 'acp_agent')),
+  chat_runtime TEXT NOT NULL DEFAULT 'model' CHECK (chat_runtime IN ('model', 'acp_agent', 'codex', 'claude-code')),
   chat_acp_agent_id TEXT,
   chat_acp_project_path TEXT NOT NULL DEFAULT '/data',
   chat_acp_project_mode TEXT NOT NULL DEFAULT 'project' CHECK (chat_acp_project_mode IN ('project', 'none')),
@@ -535,8 +535,16 @@ CREATE TABLE IF NOT EXISTS bot_sessions (
   channel_type TEXT,
   type TEXT NOT NULL DEFAULT 'chat' CHECK (type IN ('chat', 'schedule', 'subagent', 'discuss', 'acp_agent')),
   session_mode TEXT NOT NULL DEFAULT 'chat' CHECK (session_mode IN ('chat', 'discuss', 'schedule', 'subagent')),
-  runtime_type TEXT NOT NULL DEFAULT 'model' CHECK (runtime_type IN ('model', 'acp_agent')),
+  runtime_type TEXT NOT NULL DEFAULT 'model' CHECK (runtime_type IN ('model', 'acp_agent', 'codex', 'claude-code')),
   runtime_metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  -- Per-session persisted (chat model, reasoning effort) pair (issue #879);
+  -- logically one value, written/read as a unit. NULL = no memory yet.
+  -- See migration 0146 for semantics; preference writes never bump
+  -- updated_at (sidebar recency must not move on picker changes).
+  preferred_chat_model_id UUID REFERENCES models(id) ON DELETE SET NULL,
+  preferred_reasoning_effort TEXT,
+  preferred_external_model_id TEXT,
+  model_preference_revision UUID,
   -- visibility says whether the session belongs in user-facing session
   -- lists. Distinct from session_mode on purpose: schedule-created sessions
   -- keep session_mode='schedule' for prompt/tool gating but can be 'user'
@@ -609,7 +617,7 @@ CREATE TABLE IF NOT EXISTS bot_history_messages (
   metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
   usage JSONB,
   session_mode TEXT NOT NULL DEFAULT 'chat' CHECK (session_mode IN ('chat', 'discuss', 'schedule', 'subagent')),
-  runtime_type TEXT NOT NULL DEFAULT 'model' CHECK (runtime_type IN ('model', 'acp_agent')),
+  runtime_type TEXT NOT NULL DEFAULT 'model' CHECK (runtime_type IN ('model', 'acp_agent', 'codex', 'claude-code')),
   model_id UUID REFERENCES models(id) ON DELETE SET NULL,
   compact_id UUID,
   event_id UUID REFERENCES bot_session_events(id) ON DELETE SET NULL,
@@ -897,7 +905,7 @@ CREATE TABLE IF NOT EXISTS schedule (
   -- once schedule.team_id exists — see the deferred block near the end.
   run_target TEXT NOT NULL DEFAULT 'new_session' CHECK (run_target IN ('new_session', 'existing_session')),
   target_session_id UUID,
-  runtime_type TEXT CHECK (runtime_type IS NULL OR runtime_type IN ('model', 'acp_agent')),
+  runtime_type TEXT CHECK (runtime_type IS NULL OR runtime_type IN ('model', 'acp_agent', 'codex', 'claude-code')),
   bot_agent_id UUID,
   acp_agent_id TEXT,
   model_id UUID,
@@ -917,6 +925,7 @@ CREATE TABLE IF NOT EXISTS schedule (
   CONSTRAINT schedule_acp_fields_check CHECK (
     run_target <> 'new_session'
     OR (runtime_type = 'acp_agent' AND acp_agent_id IS NOT NULL AND model_id IS NULL)
+    OR (runtime_type IN ('codex', 'claude-code') AND bot_agent_id IS NOT NULL AND acp_agent_id IS NULL AND model_id IS NULL)
     OR (COALESCE(runtime_type, 'model') = 'model' AND bot_agent_id IS NULL AND acp_agent_id IS NULL AND acp_model_id IS NULL)
   ),
   CONSTRAINT schedule_model_exclusive_check CHECK (
@@ -2269,6 +2278,10 @@ CREATE TABLE IF NOT EXISTS public.session_runs (
     owner_since        TIMESTAMPTZ,
     live_generation    TEXT,
     abort_requested_at TIMESTAMPTZ,
+    proposed_terminal_state TEXT,
+    proposed_error_code TEXT,
+    proposed_error_message TEXT,
+    finish_proposed_at TIMESTAMPTZ,
     error_code         TEXT,
     error_message      TEXT,
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -2276,9 +2289,17 @@ CREATE TABLE IF NOT EXISTS public.session_runs (
     CONSTRAINT session_runs_team_run_key UNIQUE (team_id, run_id),
     CONSTRAINT session_runs_team_session_run_key UNIQUE (team_id, session_id, run_id),
     CONSTRAINT session_runs_state_check CHECK (state IN (
-        'accepted', 'running', 'waiting_decision',
+        'accepted', 'running', 'waiting_decision', 'finishing',
         'completed', 'aborted', 'failed', 'lost'
     )),
+    CONSTRAINT session_runs_terminal_proposal_check CHECK (
+        proposed_terminal_state IS NULL
+        OR proposed_terminal_state IN ('completed', 'aborted', 'failed')
+    ),
+    CONSTRAINT session_runs_finishing_proposal_check CHECK (
+        state <> 'finishing'
+        OR (proposed_terminal_state IS NOT NULL AND finish_proposed_at IS NOT NULL)
+    ),
     CONSTRAINT session_runs_fencing_token_check CHECK (fencing_token >= 0),
     CONSTRAINT session_runs_owner_claim_check CHECK ((owner_id IS NULL) = (owner_since IS NULL)),
     CONSTRAINT session_runs_bot_id_fkey
@@ -2296,11 +2317,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS session_runs_invocation_unique
 -- ledger reports as a stable retryable busy result.
 CREATE UNIQUE INDEX IF NOT EXISTS session_runs_single_active
     ON public.session_runs (team_id, session_id)
-    WHERE state IN ('accepted', 'running', 'waiting_decision');
+    WHERE state IN ('accepted', 'running', 'waiting_decision', 'finishing');
 
 CREATE INDEX IF NOT EXISTS idx_session_runs_recovery
     ON public.session_runs (team_id, live_generation, run_id)
-    WHERE state IN ('accepted', 'running', 'waiting_decision');
+    WHERE state IN ('accepted', 'running', 'waiting_decision', 'finishing');
 
 CREATE INDEX IF NOT EXISTS idx_session_runs_orphan
     ON public.session_runs (team_id, created_at, run_id)
@@ -2395,6 +2416,7 @@ CREATE TABLE IF NOT EXISTS public.context_lifecycles (
     status     TEXT        NOT NULL,
     error_code TEXT,
     snapshot   JSONB       NOT NULL,
+    selection_decisions JSONB,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT context_lifecycles_team_run_key UNIQUE (team_id, run_id),
     CONSTRAINT context_lifecycles_status_check CHECK (status IN (
@@ -2581,19 +2603,20 @@ ALTER TABLE public.schedule
     ADD CONSTRAINT schedule_workdir_id_fkey
     FOREIGN KEY (team_id, workdir_id)
     REFERENCES public.bot_workdirs(team_id, id) ON DELETE SET NULL (workdir_id);
--- ACP runtimes use a fresh process-local home for every process. Persist the
--- resumable protocol session separately from the runtime home so a later
--- process can reconstruct the adapter's JSONL transcript before issuing
--- session/resume. Snapshots are staged by run: canonical history promotes a
--- staged version by committing the session's publication head in the same
--- transaction as the round's messages.
-CREATE TABLE IF NOT EXISTS public.acp_session_states (
+-- Runtimes that own native session state (ACP agents, codex, claude-code)
+-- use a fresh process-local home for every process. Persist the resumable
+-- native session separately from the runtime home so a later process can
+-- reconstruct the runtime's JSONL transcript before resuming. Snapshots are
+-- staged by run: canonical history promotes a staged version by committing
+-- the session's publication head in the same transaction as the round's
+-- messages.
+CREATE TABLE IF NOT EXISTS public.agent_session_states (
     team_id               UUID        NOT NULL DEFAULT public.memoh_current_team_id()
                                       REFERENCES public.teams(id) ON DELETE RESTRICT,
     session_id            UUID        NOT NULL,
     through_run_id        UUID        NOT NULL,
     agent_id              TEXT        NOT NULL,
-    acp_session_id        TEXT        NOT NULL,
+    agent_session_id        TEXT        NOT NULL,
     cwd                   TEXT        NOT NULL,
     transcript_path       TEXT        NOT NULL,
     runtime_fencing_token BIGINT      NOT NULL,
@@ -2603,19 +2626,19 @@ CREATE TABLE IF NOT EXISTS public.acp_session_states (
     created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (team_id, session_id, through_run_id),
-    CONSTRAINT acp_session_states_session_id_fkey
+    CONSTRAINT agent_session_states_session_id_fkey
         FOREIGN KEY (team_id, session_id)
         REFERENCES public.bot_sessions(team_id, id) ON DELETE CASCADE,
-    CONSTRAINT acp_session_states_run_fkey
+    CONSTRAINT agent_session_states_run_fkey
         FOREIGN KEY (team_id, session_id, through_run_id)
         REFERENCES public.session_runs(team_id, session_id, run_id) ON DELETE CASCADE,
-    CONSTRAINT acp_session_states_agent_id_check
+    CONSTRAINT agent_session_states_agent_id_check
         CHECK (btrim(agent_id) <> '' AND octet_length(btrim(agent_id)) <= 256),
-    CONSTRAINT acp_session_states_acp_session_id_check
-        CHECK (btrim(acp_session_id) <> '' AND octet_length(btrim(acp_session_id)) <= 1024),
-    CONSTRAINT acp_session_states_cwd_check
+    CONSTRAINT agent_session_states_agent_session_id_check
+        CHECK (btrim(agent_session_id) <> '' AND octet_length(btrim(agent_session_id)) <= 1024),
+    CONSTRAINT agent_session_states_cwd_check
         CHECK (btrim(cwd) <> '' AND octet_length(btrim(cwd)) <= 16384),
-    CONSTRAINT acp_session_states_transcript_path_check
+    CONSTRAINT agent_session_states_transcript_path_check
         CHECK (
             transcript_path <> ''
             AND octet_length(transcript_path) <= 4096
@@ -2625,13 +2648,13 @@ CREATE TABLE IF NOT EXISTS public.acp_session_states (
             AND transcript_path !~ '(^|/)\.\.?(/|$)'
             AND transcript_path !~ E'[\r\n]'
         ),
-    CONSTRAINT acp_session_states_runtime_fencing_token_check
+    CONSTRAINT agent_session_states_runtime_fencing_token_check
         CHECK (runtime_fencing_token > 0),
-    CONSTRAINT acp_session_states_file_count_check
+    CONSTRAINT agent_session_states_file_count_check
         CHECK (file_count > 0 AND file_count <= 1024),
-    CONSTRAINT acp_session_states_record_count_check
+    CONSTRAINT agent_session_states_record_count_check
         CHECK (record_count > 0 AND record_count <= 2000000),
-    CONSTRAINT acp_session_states_file_shapes_check
+    CONSTRAINT agent_session_states_file_shapes_check
         CHECK (jsonb_typeof(file_shapes) = 'array')
 );
 
@@ -2642,7 +2665,7 @@ CREATE TABLE IF NOT EXISTS public.acp_session_states (
 -- rewrite. Lines reference the session directly (not a version header)
 -- because versions share them; version membership is defined by the header's
 -- file_shapes.
-CREATE TABLE IF NOT EXISTS public.acp_session_state_lines (
+CREATE TABLE IF NOT EXISTS public.agent_session_state_lines (
     team_id       UUID   NOT NULL DEFAULT public.memoh_current_team_id()
                           REFERENCES public.teams(id) ON DELETE RESTRICT,
     session_id    UUID   NOT NULL,
@@ -2656,10 +2679,10 @@ CREATE TABLE IF NOT EXISTS public.acp_session_state_lines (
     content       TEXT   NOT NULL,
     content_bytes INTEGER NOT NULL,
     PRIMARY KEY (team_id, session_id, file_path, line_number),
-    CONSTRAINT acp_session_state_lines_session_fkey
+    CONSTRAINT agent_session_state_lines_session_fkey
         FOREIGN KEY (team_id, session_id)
         REFERENCES public.bot_sessions(team_id, id) ON DELETE CASCADE,
-    CONSTRAINT acp_session_state_lines_file_path_check
+    CONSTRAINT agent_session_state_lines_file_path_check
         CHECK (
             file_path <> ''
             AND octet_length(file_path) <= 4096
@@ -2669,13 +2692,13 @@ CREATE TABLE IF NOT EXISTS public.acp_session_state_lines (
             AND file_path !~ '(^|/)\.\.?(/|$)'
             AND file_path !~ E'[\r\n]'
         ),
-    CONSTRAINT acp_session_state_lines_content_size_check
+    CONSTRAINT agent_session_state_lines_content_size_check
         CHECK (
             content_bytes = octet_length(content)
             AND content_bytes > 0
             AND content_bytes <= 8388608
         ),
-    CONSTRAINT acp_session_state_lines_line_number_check
+    CONSTRAINT agent_session_state_lines_line_number_check
         CHECK (line_number > 0)
 );
 
@@ -2685,7 +2708,7 @@ CREATE TABLE IF NOT EXISTS public.acp_session_state_lines (
 -- "ghost transcript" that history does not contain. checkpoint_reset = true
 -- means the head is canonical but nothing is resumable (the profile cannot
 -- snapshot, or the runtime deliberately started fresh).
-CREATE TABLE IF NOT EXISTS public.acp_session_publications (
+CREATE TABLE IF NOT EXISTS public.agent_session_publications (
     team_id          UUID        NOT NULL DEFAULT public.memoh_current_team_id()
                                  REFERENCES public.teams(id) ON DELETE RESTRICT,
     session_id       UUID        NOT NULL,
@@ -2693,53 +2716,53 @@ CREATE TABLE IF NOT EXISTS public.acp_session_publications (
     checkpoint_reset BOOLEAN     NOT NULL DEFAULT false,
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (team_id, session_id),
-    CONSTRAINT acp_session_publications_session_fkey
+    CONSTRAINT agent_session_publications_session_fkey
         FOREIGN KEY (team_id, session_id)
         REFERENCES public.bot_sessions(team_id, id) ON DELETE CASCADE,
-    CONSTRAINT acp_session_publications_run_fkey
+    CONSTRAINT agent_session_publications_run_fkey
         FOREIGN KEY (team_id, session_id, run_id)
         REFERENCES public.session_runs(team_id, session_id, run_id) ON DELETE CASCADE
 );
 
-ALTER TABLE public.acp_session_publications ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.acp_session_publications FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.agent_session_publications ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.agent_session_publications FORCE ROW LEVEL SECURITY;
 
-CREATE POLICY acp_session_publications_team_select ON public.acp_session_publications
+CREATE POLICY agent_session_publications_team_select ON public.agent_session_publications
     FOR SELECT USING (team_id = public.memoh_current_team_id());
-CREATE POLICY acp_session_publications_team_insert ON public.acp_session_publications
+CREATE POLICY agent_session_publications_team_insert ON public.agent_session_publications
     FOR INSERT WITH CHECK (team_id = public.memoh_current_team_id());
-CREATE POLICY acp_session_publications_team_update ON public.acp_session_publications
+CREATE POLICY agent_session_publications_team_update ON public.agent_session_publications
     FOR UPDATE
     USING (team_id = public.memoh_current_team_id())
     WITH CHECK (team_id = public.memoh_current_team_id());
-CREATE POLICY acp_session_publications_team_delete ON public.acp_session_publications
+CREATE POLICY agent_session_publications_team_delete ON public.agent_session_publications
     FOR DELETE USING (team_id = public.memoh_current_team_id());
 
-ALTER TABLE public.acp_session_states ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.acp_session_states FORCE ROW LEVEL SECURITY;
-ALTER TABLE public.acp_session_state_lines ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.acp_session_state_lines FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.agent_session_states ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.agent_session_states FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.agent_session_state_lines ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.agent_session_state_lines FORCE ROW LEVEL SECURITY;
 
-CREATE POLICY acp_session_states_team_select ON public.acp_session_states
+CREATE POLICY agent_session_states_team_select ON public.agent_session_states
     FOR SELECT USING (team_id = public.memoh_current_team_id());
-CREATE POLICY acp_session_states_team_insert ON public.acp_session_states
+CREATE POLICY agent_session_states_team_insert ON public.agent_session_states
     FOR INSERT WITH CHECK (team_id = public.memoh_current_team_id());
-CREATE POLICY acp_session_states_team_update ON public.acp_session_states
+CREATE POLICY agent_session_states_team_update ON public.agent_session_states
     FOR UPDATE
     USING (team_id = public.memoh_current_team_id())
     WITH CHECK (team_id = public.memoh_current_team_id());
-CREATE POLICY acp_session_states_team_delete ON public.acp_session_states
+CREATE POLICY agent_session_states_team_delete ON public.agent_session_states
     FOR DELETE USING (team_id = public.memoh_current_team_id());
 
-CREATE POLICY acp_session_state_lines_team_select ON public.acp_session_state_lines
+CREATE POLICY agent_session_state_lines_team_select ON public.agent_session_state_lines
     FOR SELECT USING (team_id = public.memoh_current_team_id());
-CREATE POLICY acp_session_state_lines_team_insert ON public.acp_session_state_lines
+CREATE POLICY agent_session_state_lines_team_insert ON public.agent_session_state_lines
     FOR INSERT WITH CHECK (team_id = public.memoh_current_team_id());
-CREATE POLICY acp_session_state_lines_team_update ON public.acp_session_state_lines
+CREATE POLICY agent_session_state_lines_team_update ON public.agent_session_state_lines
     FOR UPDATE
     USING (team_id = public.memoh_current_team_id())
     WITH CHECK (team_id = public.memoh_current_team_id());
-CREATE POLICY acp_session_state_lines_team_delete ON public.acp_session_state_lines
+CREATE POLICY agent_session_state_lines_team_delete ON public.agent_session_state_lines
     FOR DELETE USING (team_id = public.memoh_current_team_id());
 
 -- ---------------------------------------------------------------------------
@@ -2828,3 +2851,210 @@ CREATE INDEX IF NOT EXISTS idx_bot_sessions_bot_agent
 CREATE INDEX IF NOT EXISTS idx_schedule_bot_agent
     ON public.schedule (team_id, bot_agent_id)
     WHERE bot_agent_id IS NOT NULL;
+
+-- ---------------------------------------------------------------------------
+-- Agent credentials
+-- ---------------------------------------------------------------------------
+-- Encrypted credentials are team resources. Each Bot Agent instance points at
+-- exactly one credential via bot_agents.agent_credential_id (NULL = not
+-- connected); sessions and schedules follow their Bot Agent binding.
+
+CREATE TABLE IF NOT EXISTS public.agent_credentials (
+    id                   UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    team_id              UUID        NOT NULL DEFAULT public.memoh_current_team_id()
+                                     REFERENCES public.teams(id) ON DELETE RESTRICT,
+    owner_user_id        UUID        NOT NULL,
+    provider             TEXT        NOT NULL,
+    auth_kind            TEXT        NOT NULL,
+    label                TEXT        NOT NULL,
+    encrypted_payload    BYTEA       NOT NULL,
+    encryption_nonce     BYTEA       NOT NULL,
+    key_version          INTEGER     NOT NULL DEFAULT 1 CHECK (key_version > 0),
+    account_metadata     JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    expires_at           TIMESTAMPTZ,
+    credential_version   BIGINT      NOT NULL DEFAULT 1 CHECK (credential_version > 0),
+    revoked_at           TIMESTAMPTZ,
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT agent_credentials_team_key UNIQUE (team_id, id),
+    CONSTRAINT agent_credentials_owner_fkey
+        FOREIGN KEY (team_id, owner_user_id)
+        REFERENCES public.team_members(team_id, user_id) ON DELETE RESTRICT,
+    CONSTRAINT agent_credentials_provider_check CHECK (provider <> ''),
+    CONSTRAINT agent_credentials_auth_kind_check CHECK (auth_kind <> ''),
+    CONSTRAINT agent_credentials_label_check CHECK (label <> ''),
+    CONSTRAINT agent_credentials_ciphertext_check CHECK (octet_length(encrypted_payload) > 0),
+    CONSTRAINT agent_credentials_nonce_check CHECK (octet_length(encryption_nonce) = 12)
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_credentials_owner
+    ON public.agent_credentials (team_id, owner_user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_credentials_kind
+    ON public.agent_credentials (team_id, provider, auth_kind)
+    WHERE revoked_at IS NULL;
+
+ALTER TABLE public.agent_credentials ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.agent_credentials FORCE ROW LEVEL SECURITY;
+
+CREATE POLICY agent_credentials_team_select ON public.agent_credentials
+    FOR SELECT USING (team_id = public.memoh_current_team_id());
+CREATE POLICY agent_credentials_team_insert ON public.agent_credentials
+    FOR INSERT WITH CHECK (team_id = public.memoh_current_team_id());
+CREATE POLICY agent_credentials_team_update ON public.agent_credentials
+    FOR UPDATE USING (team_id = public.memoh_current_team_id())
+    WITH CHECK (team_id = public.memoh_current_team_id());
+CREATE POLICY agent_credentials_team_delete ON public.agent_credentials
+    FOR DELETE USING (team_id = public.memoh_current_team_id());
+
+-- One credential per Bot Agent instance (the column lives here as an
+-- ALTER because agent_credentials did not exist when bot_agents was created
+-- earlier in this script).
+ALTER TABLE public.bot_agents
+    ADD COLUMN IF NOT EXISTS agent_credential_id UUID;
+ALTER TABLE public.bot_agents
+    ADD CONSTRAINT bot_agents_agent_credential_id_fkey
+    FOREIGN KEY (team_id, agent_credential_id)
+    REFERENCES public.agent_credentials(team_id, id)
+    ON DELETE SET NULL (agent_credential_id);
+CREATE INDEX IF NOT EXISTS idx_bot_agents_agent_credential
+    ON public.bot_agents (team_id, agent_credential_id)
+    WHERE agent_credential_id IS NOT NULL;
+
+-- ---------------------------------------------------------------------------
+-- Workspace dependency installations
+-- ---------------------------------------------------------------------------
+-- Per-bot, per-workspace-target dependency installation intent for the
+-- Workspace dependency manager.
+-- Rows express what the user asked for; discovery corrects status/source and
+-- never deletes a record.
+
+CREATE TABLE IF NOT EXISTS public.bot_dependency_installations (
+    id                  UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    team_id             UUID        NOT NULL DEFAULT public.memoh_current_team_id()
+                                    REFERENCES public.teams(id) ON DELETE RESTRICT,
+    bot_id              UUID        NOT NULL,
+    workspace_target_id TEXT        NOT NULL,
+    dependency_id       TEXT        NOT NULL,
+    source              TEXT        NOT NULL,
+    status              TEXT        NOT NULL,
+    installed_version   TEXT        NOT NULL DEFAULT '',
+    latest_version      TEXT        NOT NULL DEFAULT '',
+    last_checked_at     TIMESTAMPTZ,
+    last_error          TEXT        NOT NULL DEFAULT '',
+    manifest_digest     TEXT        NOT NULL DEFAULT '',
+    source_url          TEXT        NOT NULL DEFAULT '',
+    registry_id         TEXT        NOT NULL DEFAULT '',
+    definition_revision TEXT        NOT NULL DEFAULT '',
+    operation_id        TEXT        NOT NULL DEFAULT '',
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT memoh_team_key_07a3be5666c2 UNIQUE (team_id, id),
+    CONSTRAINT bot_dependency_installations_identity_key
+        UNIQUE (team_id, bot_id, workspace_target_id, dependency_id),
+    CONSTRAINT bot_dependency_installations_bot_id_fkey
+        FOREIGN KEY (team_id, bot_id)
+        REFERENCES public.bots(team_id, id) ON DELETE CASCADE,
+    CONSTRAINT bot_dependency_installations_dependency_id_check
+        CHECK (dependency_id <> ''),
+    CONSTRAINT bot_dependency_installations_source_check
+        CHECK (source IN ('image', 'managed')),
+    CONSTRAINT bot_dependency_installations_status_check
+        CHECK (status IN ('installed', 'installing', 'updating', 'removing', 'missing', 'failed'))
+);
+
+-- The operation token fences terminal writes from other Server instances.
+ALTER TABLE public.bot_dependency_installations
+    ADD COLUMN IF NOT EXISTS operation_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE public.bot_dependency_installations
+    DROP CONSTRAINT IF EXISTS bot_dependency_installations_operation_id_check;
+ALTER TABLE public.bot_dependency_installations
+    ADD CONSTRAINT bot_dependency_installations_operation_id_check
+    CHECK (operation_id = '' OR operation_id ~ '^[a-f0-9]{32}$');
+
+-- The identity unique key also serves target-scoped installation lookups.
+DROP INDEX IF EXISTS public.idx_bot_dependency_installations_bot;
+
+ALTER TABLE public.bot_dependency_installations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.bot_dependency_installations FORCE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS bot_dependency_installations_team_select ON public.bot_dependency_installations;
+CREATE POLICY bot_dependency_installations_team_select ON public.bot_dependency_installations
+    FOR SELECT USING (team_id = public.memoh_current_team_id());
+DROP POLICY IF EXISTS bot_dependency_installations_team_insert ON public.bot_dependency_installations;
+CREATE POLICY bot_dependency_installations_team_insert ON public.bot_dependency_installations
+    FOR INSERT WITH CHECK (team_id = public.memoh_current_team_id());
+DROP POLICY IF EXISTS bot_dependency_installations_team_update ON public.bot_dependency_installations;
+CREATE POLICY bot_dependency_installations_team_update ON public.bot_dependency_installations
+    FOR UPDATE
+    USING (team_id = public.memoh_current_team_id())
+    WITH CHECK (team_id = public.memoh_current_team_id());
+DROP POLICY IF EXISTS bot_dependency_installations_team_delete ON public.bot_dependency_installations;
+CREATE POLICY bot_dependency_installations_team_delete ON public.bot_dependency_installations
+    FOR DELETE USING (team_id = public.memoh_current_team_id());
+
+-- Immutable dependency definitions and the independently refreshed catalog.
+-- Entries are shared only within a team and one configured Supermarket origin.
+CREATE TABLE IF NOT EXISTS public.workspace_dependency_definitions (
+    team_id UUID NOT NULL DEFAULT public.memoh_current_team_id() REFERENCES public.teams(id) ON DELETE RESTRICT,
+    source_url TEXT NOT NULL,
+    registry_id TEXT NOT NULL CHECK (registry_id = 'memoh'),
+    dependency_id TEXT NOT NULL,
+    revision TEXT NOT NULL CHECK (revision ~ '^[a-f0-9]{64}$'),
+    release_bytes BYTEA NOT NULL CHECK (octet_length(release_bytes) BETWEEN 1 AND 1048576),
+    artifact_bytes BYTEA NOT NULL CHECK (octet_length(artifact_bytes) BETWEEN 1 AND 1048576),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    icon_digest TEXT NOT NULL DEFAULT '',
+    last_accessed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (team_id, source_url, registry_id, dependency_id, revision)
+);
+
+ALTER TABLE public.workspace_dependency_definitions
+    ADD COLUMN IF NOT EXISTS icon_digest TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS last_accessed_at TIMESTAMPTZ NOT NULL DEFAULT now();
+-- Upgrade cached releases written before the indexed icon digest was added.
+-- The migration owner can backfill every team while FORCE RLS is lifted.
+ALTER TABLE public.workspace_dependency_definitions NO FORCE ROW LEVEL SECURITY;
+UPDATE public.workspace_dependency_definitions
+SET icon_digest = COALESCE(convert_from(release_bytes, 'UTF8')::jsonb -> 'icon' ->> 'digest', '')
+WHERE icon_digest = '';
+CREATE INDEX IF NOT EXISTS idx_workspace_dependency_definitions_icon
+    ON public.workspace_dependency_definitions (team_id, source_url, icon_digest);
+
+CREATE TABLE IF NOT EXISTS public.workspace_dependency_catalogs (
+    team_id UUID NOT NULL DEFAULT public.memoh_current_team_id() REFERENCES public.teams(id) ON DELETE RESTRICT,
+    source_url TEXT NOT NULL,
+    catalog_bytes BYTEA NOT NULL CHECK (octet_length(catalog_bytes) BETWEEN 1 AND 4194304),
+    generation BIGINT NOT NULL DEFAULT 1 CHECK (generation > 0),
+    fetched_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (team_id, source_url)
+);
+
+ALTER TABLE public.workspace_dependency_definitions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.workspace_dependency_definitions FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS workspace_dependency_definitions_team_select ON public.workspace_dependency_definitions;
+CREATE POLICY workspace_dependency_definitions_team_select ON public.workspace_dependency_definitions
+    FOR SELECT USING (team_id = public.memoh_current_team_id());
+DROP POLICY IF EXISTS workspace_dependency_definitions_team_insert ON public.workspace_dependency_definitions;
+CREATE POLICY workspace_dependency_definitions_team_insert ON public.workspace_dependency_definitions
+    FOR INSERT WITH CHECK (team_id = public.memoh_current_team_id());
+DROP POLICY IF EXISTS workspace_dependency_definitions_team_update ON public.workspace_dependency_definitions;
+CREATE POLICY workspace_dependency_definitions_team_update ON public.workspace_dependency_definitions
+    FOR UPDATE USING (team_id = public.memoh_current_team_id()) WITH CHECK (team_id = public.memoh_current_team_id());
+DROP POLICY IF EXISTS workspace_dependency_definitions_team_delete ON public.workspace_dependency_definitions;
+CREATE POLICY workspace_dependency_definitions_team_delete ON public.workspace_dependency_definitions
+    FOR DELETE USING (team_id = public.memoh_current_team_id());
+
+ALTER TABLE public.workspace_dependency_catalogs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.workspace_dependency_catalogs FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS workspace_dependency_catalogs_team_select ON public.workspace_dependency_catalogs;
+CREATE POLICY workspace_dependency_catalogs_team_select ON public.workspace_dependency_catalogs
+    FOR SELECT USING (team_id = public.memoh_current_team_id());
+DROP POLICY IF EXISTS workspace_dependency_catalogs_team_insert ON public.workspace_dependency_catalogs;
+CREATE POLICY workspace_dependency_catalogs_team_insert ON public.workspace_dependency_catalogs
+    FOR INSERT WITH CHECK (team_id = public.memoh_current_team_id());
+DROP POLICY IF EXISTS workspace_dependency_catalogs_team_update ON public.workspace_dependency_catalogs;
+CREATE POLICY workspace_dependency_catalogs_team_update ON public.workspace_dependency_catalogs
+    FOR UPDATE USING (team_id = public.memoh_current_team_id()) WITH CHECK (team_id = public.memoh_current_team_id());
+DROP POLICY IF EXISTS workspace_dependency_catalogs_team_delete ON public.workspace_dependency_catalogs;
+CREATE POLICY workspace_dependency_catalogs_team_delete ON public.workspace_dependency_catalogs
+    FOR DELETE USING (team_id = public.memoh_current_team_id());

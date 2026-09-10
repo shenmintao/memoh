@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -48,19 +47,20 @@ func runHandleForCommand(cmd Command) RunHandle {
 // DecisionContinuationContext detaches the model continuation from the short
 // command acknowledgement deadline while keeping it tied to the run owner's
 // lifecycle and persistence fence.
-func (m *Manager) DecisionContinuationContext(cmd Command) (context.Context, context.CancelFunc, error) {
+func (m *Manager) DecisionContinuationContext(cmd Command) (context.Context, context.CancelFunc, RunHandle, error) {
 	ctrl := m.localControlForScope(cmd.BotID, cmd.SessionID, cmd.RunID)
 	if ctrl == nil || ctrl.generation != strings.TrimSpace(cmd.Generation) || !ctrl.commandsActive() {
-		return nil, func() {}, ErrCommandTargetNotActive
+		return nil, func() {}, RunHandle{}, ErrCommandTargetNotActive
 	}
 	// The acknowledgement request ends before the continuation. Only the run
 	// lifecycle owns this context, so no transport cancellation is attached.
 	ctx, cancel := ctrl.commandContext(context.Background())
-	if err := m.ValidateRunOwnership(ctx, runHandleForCommand(cmd)); err != nil {
+	handle := ctrl.handle()
+	if err := m.ValidateRunOwnership(ctx, handle); err != nil {
 		cancel()
-		return nil, func() {}, err
+		return nil, func() {}, RunHandle{}, err
 	}
-	return ctx, cancel, nil
+	return ctx, cancel, handle, nil
 }
 
 // WaitDecisionContinuationReady holds the resumed model call until the stream
@@ -366,7 +366,13 @@ func (m *Manager) abortLocal(ctx context.Context, ctrl *runControl) (bool, error
 	if ctrl.cancel != nil {
 		ctrl.cancel()
 	}
-	if waitingDecision {
+	if waitingDecision && !ctrl.resumesOnTerminalDecision() {
+		// A native parked run has no live stream to observe the cancel; the
+		// terminal write must happen here. An inline runtime's turn is still
+		// alive blocked on its waiter — the cancel unwinds it and the turn's
+		// own FinishRun records the abort AFTER the driver actually returns,
+		// so the ledger's terminal state is a truthful "driver stopped"
+		// signal for deletion barriers on any instance.
 		if err := m.FinishRun(context.WithoutCancel(ctx), ctrl.handle(), RunStatusAborted, ""); err != nil {
 			return false, err
 		}
@@ -504,7 +510,7 @@ func (m *Manager) RouteDecisionResponse(ctx context.Context, response DecisionRe
 		return DecisionResponseResult{Handled: true}, err
 	} else if ok {
 		err := commandResultErrorFor(Command{PayloadHash: requestHash}, stored)
-		return DecisionResponseResult{Handled: true, Applied: err == nil}, err
+		return DecisionResponseResult{Handled: true, Applied: err == nil, Replayed: true}, err
 	}
 
 	m.mu.Lock()
@@ -522,7 +528,7 @@ func (m *Manager) RouteDecisionResponse(ctx context.Context, response DecisionRe
 		// ACP/MCP and other unfenced decisions retain their waiter-backed path.
 		return DecisionResponseResult{}, nil
 	}
-	result := DecisionResponseResult{Handled: true}
+	result := DecisionResponseResult{Handled: true, RunID: target.RunID, SessionID: target.SessionID}
 	if target.Type != response.Type ||
 		target.BotID != response.BotID ||
 		response.SessionID != "" && target.SessionID != response.SessionID ||
@@ -534,7 +540,7 @@ func (m *Manager) RouteDecisionResponse(ctx context.Context, response DecisionRe
 			if target.PayloadHash != requestHash {
 				return result, ErrCommandPayloadConflict
 			}
-			return DecisionResponseResult{Handled: true, Applied: true}, nil
+			return DecisionResponseResult{Handled: true, Applied: true, Replayed: true}, nil
 		}
 		return result, nil
 	}
@@ -566,6 +572,7 @@ func (m *Manager) RouteDecisionResponse(ctx context.Context, response DecisionRe
 	if !ok || strings.TrimSpace(ref.OwnerID) == "" && m.distributed != nil {
 		return result, ErrCommandOwnerUnavailable
 	}
+	result.Generation = ref.Generation
 	createdAt, err := m.backend.Now(ctx)
 	if err != nil {
 		return result, fmt.Errorf("load runtime command time: %w", err)
@@ -574,7 +581,7 @@ func (m *Manager) RouteDecisionResponse(ctx context.Context, response DecisionRe
 		Type: response.Type, ID: commandID,
 		BotID: target.BotID, SessionID: target.SessionID, RunID: target.RunID,
 		Generation: ref.Generation, FencingToken: target.FencingToken,
-		TargetID: target.ID, DecisionResolved: true,
+		TargetID: target.ID, DecisionResolved: true, StreamOutput: response.streamOutput,
 		Payload: append([]byte(nil), response.Payload...), PayloadHash: requestHash,
 		CreatedAt: createdAt, ExpiresAt: createdAt.Add(m.commandTimeout()),
 	}
@@ -627,114 +634,6 @@ func (m *Manager) decisionRunRef(ctx context.Context, target DecisionTarget) (Ru
 	}, true, nil
 }
 
-// DispatchActiveCommand is the legacy projection-based compatibility entry
-// point used by older internal callers. New transports use
-// RouteDecisionResponse and never use CurrentRunView.Messages for routing.
-func (m *Manager) DispatchActiveCommand(ctx context.Context, botID, sessionID, commandType, targetID string, payload []byte) (bool, error) {
-	if m == nil || m.backend == nil {
-		return false, nil
-	}
-	botID = strings.TrimSpace(botID)
-	sessionID = strings.TrimSpace(sessionID)
-	targetID = strings.TrimSpace(targetID)
-	if botID == "" || sessionID == "" || targetID == "" {
-		return false, nil
-	}
-	if commandType != CommandToolApprovalResponse && commandType != CommandUserInputResponse {
-		return false, fmt.Errorf("unsupported active runtime command %q", commandType)
-	}
-	snapshot, err := m.Snapshot(ctx, botID, sessionID)
-	if err != nil {
-		return false, err
-	}
-	run := snapshot.CurrentRunView
-	if run == nil {
-		return false, nil
-	}
-	canonicalTargetID, targetPresent := runtimeCommandTargetID(run, commandType, targetID)
-	if !targetPresent {
-		return false, nil
-	}
-	cmd := Command{
-		Type: commandType, ID: activeCommandID(botID, sessionID, run, commandType, canonicalTargetID),
-		BotID: botID, SessionID: sessionID, RunID: strings.TrimSpace(run.RunID),
-		Generation: strings.TrimSpace(run.Generation), TargetID: canonicalTargetID,
-		Payload: append([]byte(nil), payload...), PayloadHash: activeCommandPayloadHash(commandType, payload),
-	}
-	timeout := m.commandTimeout()
-	if m.distributed != nil {
-		loadCtx, cancel := context.WithTimeout(ctx, min(timeout, 100*time.Millisecond))
-		result, ok, loadErr := m.loadCommandResult(loadCtx, cmd.ID)
-		cancel()
-		if loadErr != nil {
-			return true, loadErr
-		} else if ok {
-			return true, commandResultErrorFor(cmd, result)
-		}
-	}
-	if !isActiveRunStatus(run.Status) {
-		if reconciled, reconcileErr := m.reconcileRoutedCommand(ctx, cmd); reconciled {
-			if reconcileErr != nil {
-				return true, reconcileErr
-			}
-			result := m.persistCommandResult(ctx, cmd, reconcileErr)
-			return true, commandResultErrorFor(cmd, result)
-		}
-		return false, nil
-	}
-	createdAt, err := m.backend.Now(ctx)
-	if err != nil {
-		return true, fmt.Errorf("load runtime command time: %w", err)
-	}
-	cmd.CreatedAt = createdAt
-	cmd.ExpiresAt = createdAt.Add(timeout)
-	if m.distributed == nil {
-		commandCtx, cancel, commandErr := m.activeCommandContext(ctx, cmd)
-		defer cancel()
-		if commandErr != nil {
-			return true, commandErr
-		}
-		return true, m.applyRoutedCommand(commandCtx, cmd)
-	}
-	ownerID := strings.TrimSpace(run.OwnerID)
-	if ownerID == "" {
-		return true, errors.New("target runtime owner is unknown")
-	}
-	if ownerID == m.ownerID {
-		result := m.executeRoutedCommand(ctx, cmd)
-		return true, commandResultErrorFor(cmd, result)
-	}
-	dispatchErr := m.dispatchRemoteCommand(ctx, ownerID, cmd)
-	if dispatchErr != nil {
-		if reconciled, reconcileErr := m.reconcileRoutedCommand(ctx, cmd); reconciled {
-			if reconcileErr != nil {
-				return true, reconcileErr
-			}
-			result := m.persistCommandResult(ctx, cmd, reconcileErr)
-			return true, commandResultErrorFor(cmd, result)
-		}
-	}
-	return true, dispatchErr
-}
-
-// DispatchRunCommand is the transport-facing decision route. In addition to
-// the canonical decision id it checks the server-issued run id, preventing a
-// stale UI response from being applied to a newer run in the same session.
-func (m *Manager) DispatchRunCommand(ctx context.Context, botID, sessionID, runID, commandType, targetID string, payload []byte) (bool, error) {
-	runID = strings.TrimSpace(runID)
-	if runID == "" {
-		return false, nil
-	}
-	snapshot, err := m.Snapshot(ctx, botID, sessionID)
-	if err != nil {
-		return false, err
-	}
-	if snapshot.CurrentRunView == nil || strings.TrimSpace(snapshot.CurrentRunView.RunID) != runID {
-		return false, nil
-	}
-	return m.DispatchActiveCommand(ctx, botID, sessionID, commandType, targetID, payload)
-}
-
 func (m *Manager) dispatchRemoteCommand(ctx context.Context, ownerID string, cmd Command) error {
 	ownerID = strings.TrimSpace(ownerID)
 	cmd.ID = strings.TrimSpace(cmd.ID)
@@ -772,15 +671,6 @@ func (m *Manager) dispatchRemoteCommand(ctx context.Context, ownerID string, cmd
 		return err
 	}
 	return m.waitCommandResult(ctx, cmd, waiter.result, m.commandTimeout(), ownerID)
-}
-
-func activeCommandID(botID, sessionID string, run *CurrentRunView, commandType, targetID string) string {
-	parts := []string{
-		strings.TrimSpace(botID), strings.TrimSpace(sessionID), strings.TrimSpace(run.RunID),
-		strings.TrimSpace(run.Generation), strings.TrimSpace(commandType), strings.TrimSpace(targetID),
-	}
-	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
-	return fmt.Sprintf("active-response-%x", sum[:])
 }
 
 func commandPayloadHash(payload []byte) string {
@@ -900,7 +790,7 @@ func (m *Manager) requestAbort(ctx context.Context, ctrl *runControl) (bool, err
 		if run == nil {
 			return snapshot, false, nil
 		}
-		if run.RunID != ctrl.runID || !m.runOwnerMatches(run) || !isActiveRunStatus(run.Status) {
+		if run.RunID != ctrl.runID || !m.runOwnerMatches(run) || !isAbortableRunStatus(run.Status) {
 			return snapshot, false, nil
 		}
 		acknowledged = true
@@ -913,7 +803,7 @@ func (m *Manager) requestAbort(ctx context.Context, ctrl *runControl) (bool, err
 		run.UpdatedAt = now
 		return snapshot, true, nil
 	}, func(snapshot Snapshot) RuntimeDelta {
-		return runtimeRunPatch(snapshot, true, false, false, false)
+		return runtimeRunPatch(snapshot, true, false, false)
 	})
 	return acknowledged, err
 }
@@ -980,7 +870,10 @@ func (m *Manager) steerWithQueue(ctx context.Context, botID, sessionID, runID, e
 	if expectedGeneration != "" {
 		generation = expectedGeneration
 	}
-	handle := RunHandle{BotID: botID, SessionID: sessionID, RunID: runID, Generation: generation}.normalized()
+	handle := RunHandle{
+		BotID: botID, SessionID: sessionID, RunID: runID, Generation: generation,
+		FencingToken: snapshot.CurrentRunView.FencingToken,
+	}.normalized()
 	var steer SteerState
 	var ownerID string
 	var commandGeneration string
@@ -1040,7 +933,7 @@ func (m *Manager) steerWithQueue(ctx context.Context, botID, sessionID, runID, e
 		commandGeneration = strings.TrimSpace(snapshot.CurrentRunView.Generation)
 		return snapshot, true, nil
 	}, func(snapshot Snapshot) RuntimeDelta {
-		return runtimeRunPatch(snapshot, false, false, true, false)
+		return legacyRuntimeRunPatch(snapshot, false, false, true, false)
 	})
 	if err != nil {
 		return SteerState{}, err
@@ -1052,7 +945,8 @@ func (m *Manager) steerWithQueue(ctx context.Context, botID, sessionID, runID, e
 	cmd := Command{
 		Type: CommandSteer, BotID: botID, SessionID: sessionID, RunID: runID,
 		Generation: commandGeneration, SteerID: steer.ID, Text: text, CreatedAt: commandCreatedAt,
-		ExpiresAt: commandCreatedAt.Add(m.commandTimeout()),
+		FencingToken: handle.FencingToken,
+		ExpiresAt:    commandCreatedAt.Add(m.commandTimeout()),
 	}
 	if ctrl := m.localControlForHandle(handle); ctrl != nil {
 		m.applyCommand(ctx, cmd)
@@ -1076,7 +970,7 @@ func (m *Manager) steerWithQueue(ctx context.Context, botID, sessionID, runID, e
 
 func (m *Manager) applyCommand(ctx context.Context, cmd Command) {
 	switch strings.TrimSpace(cmd.Type) {
-	case CommandAbort, CommandToolApprovalResponse, CommandUserInputResponse, CommandHistoryReset:
+	case CommandAbort, CommandSteerWake, CommandToolApprovalResponse, CommandUserInputResponse, CommandHistoryReset:
 		m.publishStoredCommandResult(ctx, cmd, m.executeRoutedCommand(ctx, cmd))
 	case CommandSteer:
 		commandCtx, cancel, err := m.activeCommandContext(ctx, cmd)
@@ -1156,10 +1050,17 @@ func (m *Manager) applyRoutedCommand(ctx context.Context, cmd Command) error {
 		_, err := m.abortLocal(commandCtx, ctrl)
 		return err
 	}
+	if strings.TrimSpace(cmd.Type) == CommandSteerWake {
+		if !run.SteerSupported || (run.Status != RunStatusRunning && run.Status != RunStatusWaitingDecision) {
+			return ErrCommandTargetNotActive
+		}
+		m.wakeSteer(ctrl)
+		return nil
+	}
 	if strings.TrimSpace(cmd.Type) == CommandHistoryReset {
 		return m.applyHistoryResetCommand(commandCtx, cmd, ctrl)
 	}
-	if !cmd.DecisionResolved && !runtimeCommandTargetPresent(run, cmd.Type, cmd.TargetID) {
+	if !cmd.DecisionResolved {
 		return ErrCommandTargetNotActive
 	}
 	m.mu.Lock()
@@ -1205,34 +1106,11 @@ func (m *Manager) executeRoutedCommand(ctx context.Context, cmd Command) Command
 		return result
 	}
 	commandCtx, cancel, err := m.activeCommandContext(ctx, cmd)
-	reconciled := false
 	if err == nil {
 		err = m.applyRoutedCommand(commandCtx, cmd)
-		if errors.Is(err, ErrCommandTargetNotActive) {
-			if handled, reconcileErr := m.reconcileRoutedCommand(commandCtx, cmd); handled {
-				reconciled = true
-				err = reconcileErr
-			}
-		}
 	}
 	cancel()
-	if reconciled && err != nil {
-		return newCommandResult(cmd, err)
-	}
 	return m.persistCommandResult(ctx, cmd, err)
-}
-
-func (m *Manager) reconcileRoutedCommand(ctx context.Context, cmd Command) (bool, error) {
-	if m == nil {
-		return false, nil
-	}
-	m.mu.Lock()
-	reconciler := m.commandReconciler
-	m.mu.Unlock()
-	if reconciler == nil {
-		return false, nil
-	}
-	return reconciler(ctx, cmd)
 }
 
 func newCommandResult(request Command, err error) Command {
@@ -1557,7 +1435,7 @@ func (m *Manager) finishCommandExecution(commandID string, done chan struct{}) {
 
 func isDurableRoutedCommand(cmd Command) bool {
 	switch strings.TrimSpace(cmd.Type) {
-	case CommandAbort, CommandToolApprovalResponse, CommandUserInputResponse, CommandHistoryReset:
+	case CommandAbort, CommandSteerWake, CommandToolApprovalResponse, CommandUserInputResponse, CommandHistoryReset:
 		return strings.TrimSpace(cmd.ID) != ""
 	default:
 		return false
@@ -1585,39 +1463,6 @@ func (m *Manager) releaseCommandAdmission(cmd Command) {
 	m.mu.Lock()
 	delete(m.admittedCommands, strings.TrimSpace(cmd.ID))
 	m.mu.Unlock()
-}
-
-func runtimeCommandTargetID(run *CurrentRunView, commandType, targetID string) (string, bool) {
-	targetID = strings.TrimSpace(targetID)
-	if run == nil || targetID == "" {
-		return "", false
-	}
-	for _, message := range run.Messages {
-		switch commandType {
-		case CommandToolApprovalResponse:
-			if message.Approval != nil && (strings.TrimSpace(message.Approval.ApprovalID) == targetID || strconv.Itoa(message.Approval.ShortID) == targetID) {
-				canonical := strings.TrimSpace(message.Approval.ApprovalID)
-				if canonical == "" {
-					canonical = strconv.Itoa(message.Approval.ShortID)
-				}
-				return canonical, true
-			}
-		case CommandUserInputResponse:
-			if message.UserInput != nil && (strings.TrimSpace(message.UserInput.UserInputID) == targetID || strconv.Itoa(message.UserInput.ShortID) == targetID) {
-				canonical := strings.TrimSpace(message.UserInput.UserInputID)
-				if canonical == "" {
-					canonical = strconv.Itoa(message.UserInput.ShortID)
-				}
-				return canonical, true
-			}
-		}
-	}
-	return "", false
-}
-
-func runtimeCommandTargetPresent(run *CurrentRunView, commandType, targetID string) bool {
-	_, ok := runtimeCommandTargetID(run, commandType, targetID)
-	return ok
 }
 
 func (m *Manager) applySteerCommand(ctx context.Context, cmd Command) {
@@ -1722,7 +1567,7 @@ func (m *Manager) transitionSteerStatus(ctx context.Context, handle RunHandle, s
 		syncLatestSteer(snapshot.CurrentRunView)
 		return snapshot, true, nil
 	}, func(snapshot Snapshot) RuntimeDelta {
-		return runtimeRunPatch(snapshot, false, false, true, false)
+		return legacyRuntimeRunPatch(snapshot, false, false, true, false)
 	})
 	if changed && err == nil && (status == SteerStatusApplied || status == SteerStatusRejected) {
 		m.dispatchSteerQueue(context.WithoutCancel(ctx), handle)
@@ -1767,7 +1612,7 @@ func (m *Manager) rejectUnacknowledgedSteer(ctx context.Context, handle RunHandl
 		steer.UpdatedAt = now
 		return snapshot, true, nil
 	}, func(snapshot Snapshot) RuntimeDelta {
-		return runtimeRunPatch(snapshot, false, false, true, false)
+		return legacyRuntimeRunPatch(snapshot, false, false, true, false)
 	})
 	return err
 }

@@ -281,19 +281,28 @@ func sendEvent(ctx context.Context, ch chan<- StreamEvent, evt StreamEvent) bool
 }
 
 func (a *Agent) runStream(ctx context.Context, cfg RunConfig, ch chan<- StreamEvent) {
-	cfg.Model = modelWithProviderStreamEventObserver(cfg.Model, cfg.OnProviderStreamEventObserved)
 	if cfg.ContextLifecycle == nil {
 		cfg.ContextLifecycle = contextfrag.NewLifecycleHolder()
 	}
 	streamCtx, cancel := context.WithCancelCause(ctx)
+	var steerGate *modelSteerGate
+	if cfg.PendingSteer != nil && cfg.OnSteer != nil {
+		steerGate = &modelSteerGate{cancel: cancel, ready: make(chan struct{}, 1)}
+		go a.watchSteer(streamCtx, cfg, steerGate)
+	}
+	cfg.Model = modelWithProviderStreamEventObserver(cfg.Model, cfg.OnProviderStreamEventObserved, steerGate)
 	eventGate := newStreamEmitterGate(streamCtx, ch)
 	defer func() {
 		cancel(nil)
 		eventGate.close()
 	}()
 	aborted := false
+	continued := false
 	turnError := ""
 	defer func() {
+		if continued {
+			return
+		}
 		event := hooks.EventTurnEnd
 		if aborted || strings.TrimSpace(turnError) != "" {
 			event = hooks.EventTurnError
@@ -302,6 +311,9 @@ func (a *Agent) runStream(ctx context.Context, cfg RunConfig, ch chan<- StreamEv
 			}
 		}
 		a.runTurnHook(context.WithoutCancel(ctx), cfg, event, turnError)
+	}()
+	defer func() {
+		a.logContextLifecycle(cfg)
 	}()
 
 	// Stream emitter: tools targeting the current conversation push
@@ -445,7 +457,9 @@ func (a *Agent) runStream(ctx context.Context, cfg RunConfig, ch chan<- StreamEv
 		}
 	}
 
+	prepareStep = prepareQueuedSteer(prepareStep, cfg)
 	prepareStep, committedStepMessages := capturePreparedStepMessages(prepareStep)
+	committedStepMessages.byStep[0] = cloneProviderMessages(cfg.initialStepInputs)
 	if readMediaState != nil {
 		committedStepMessages.addAdmissionObserver(readMediaState.reconcilePreparedMessages)
 	}
@@ -472,9 +486,12 @@ func (a *Agent) runStream(ctx context.Context, cfg RunConfig, ch chan<- StreamEv
 	}
 	opts = append(opts, a.onStepOption(streamCtx, cfg, nil))
 	var nextDurableStep int
+	// emittedStep counts FinishStepParts seen on this attempt so the step_end
+	// marker can name the durable step index the following commit will use.
+	emittedStep := 0
 	onStepCommitted := func(ctx context.Context, stepIndex int, step *sdk.StepResult) error {
 		if cfg.OnStepCommitted != nil {
-			if err := cfg.OnStepCommitted(ctx, stepIndex, committedStepMessages.decorate(stepIndex, step, toolExecutionMetadata)); err != nil {
+			if err := cfg.OnStepCommitted(ctx, cfg.StepIndexOffset+stepIndex, committedStepMessages.decorate(stepIndex, step, toolExecutionMetadata)); err != nil {
 				return err
 			}
 		}
@@ -529,7 +546,9 @@ func (a *Agent) runStream(ctx context.Context, cfg RunConfig, ch chan<- StreamEv
 		}
 	}
 
-	sendEvent(ctx, ch, StreamEvent{Type: EventAgentStart})
+	if !cfg.SuppressAgentStart {
+		sendEvent(ctx, ch, StreamEvent{Type: EventAgentStart})
+	}
 
 	var allText strings.Builder
 	var interruptedStep interruptedStepCapture
@@ -556,6 +575,15 @@ func (a *Agent) runStream(ctx context.Context, cfg RunConfig, ch chan<- StreamEv
 		switch p := part.(type) {
 		case *sdk.StartPart:
 			_ = p // stream start already emitted
+
+		case *sdk.FinishStepPart:
+			// Emitted after every part of the step and before the SDK invokes the
+			// commit barrier. The session runtime uses it to know the step's live
+			// projection is complete before it anchors a queue steer to it.
+			if !sendEvent(ctx, ch, StreamEvent{Type: EventStepEnd, StepNumber: cfg.StepIndexOffset + emittedStep}) {
+				aborted = true
+			}
+			emittedStep++
 
 		case *sdk.TextStartPart:
 			if !sendEvent(ctx, ch, StreamEvent{Type: EventTextStart}) {
@@ -729,7 +757,7 @@ func (a *Agent) runStream(ctx context.Context, cfg RunConfig, ch chan<- StreamEv
 			}
 
 		case *sdk.ErrorPart:
-			if contextStepBudgetError(streamCtx) != nil {
+			if streamCtx.Err() != nil {
 				aborted = true
 				break
 			}
@@ -769,7 +797,8 @@ func (a *Agent) runStream(ctx context.Context, cfg RunConfig, ch chan<- StreamEv
 			break
 		}
 	}
-	if ctx.Err() != nil {
+	steered := errors.Is(context.Cause(streamCtx), errModelSteered)
+	if ctx.Err() != nil || steered {
 		aborted = true
 	}
 
@@ -789,6 +818,45 @@ func (a *Agent) runStream(ctx context.Context, cfg RunConfig, ch chan<- StreamEv
 		streamClosed = drainStreamUntilClosed(streamResult.Stream, streamCancelDrainGrace, interruptedStep.observe)
 	}
 
+	if steered && ctx.Err() == nil && streamClosed {
+		// The SDK is now quiescent: it cannot commit or execute a late tool.
+		// Checkpoint even a silent attempt so the original user/input admission
+		// and step cursor survive before we append the next input to this run.
+		step := interruptedStep.snapshot(nextDurableStep)
+		if step == nil {
+			step = &sdk.StepResult{}
+		}
+		step = committedStepMessages.decorate(nextDurableStep, step, toolExecutionMetadata)
+		checkpointMessages := step.Messages
+		if nextDurableStep == 0 {
+			// Initial steer inputs already live in cfg.Messages. The decorated
+			// step includes them for persistence, not a second prompt insertion.
+			checkpointMessages = checkpointMessages[min(len(cfg.initialStepInputs), len(checkpointMessages)):]
+		}
+		index := cfg.StepIndexOffset + nextDurableStep
+		sendEvent(ctx, ch, StreamEvent{Type: EventStepEnd, StepNumber: index})
+		if err := cfg.OnSteer(ctx, index, step); err == nil {
+			messages := append(steerContinuationMessages(cfg, streamResult.Steps, committedStepMessages), steerCheckpointMessages(checkpointMessages)...)
+			cfg = appendSteerContinuation(cfg, messages, nextDurableStep+1)
+			if cfg.ContinueAfterFinal != nil {
+				cfg.ContinueAfterFinal.Store(false)
+			}
+			eventGate.close()
+			continued = true
+			a.runStream(ctx, cfg, ch)
+			return
+		} else {
+			a.logger.Error("checkpoint steered model invocation failed", slog.Any("error", err))
+		}
+	}
+	if steered && ctx.Err() == nil {
+		// An unquiesced invocation or failed checkpoint cannot safely resume.
+		// Use the existing public interruption error; diagnostics stay in logs.
+		public, _ := apperror.PublicFrom(apperror.New(apperror.CodeAgentResponseInterrupted, nil), "")
+		turnError = public.Detail
+		sendEvent(ctx, ch, StreamEvent{Type: EventError, Error: public.Detail, Code: string(public.Code)})
+	}
+
 	// Only external cancellation can represent a user/session abort. Provider
 	// errors and loop guards keep their existing failure semantics.
 	//
@@ -803,7 +871,7 @@ func (a *Agent) runStream(ctx context.Context, cfg RunConfig, ch chan<- StreamEv
 		stepIndex := nextDurableStep
 		if step := interruptedStep.snapshot(stepIndex); step != nil {
 			step = committedStepMessages.decorate(stepIndex, step, toolExecutionMetadata)
-			if err := cfg.OnStepInterrupted(context.WithoutCancel(streamCtx), stepIndex, step); err != nil {
+			if err := cfg.OnStepInterrupted(ctx, cfg.StepIndexOffset+stepIndex, step); err != nil {
 				// An owner that lost its lease, or a run another writer already
 				// finalized, is an expected outcome of racing an abort.
 				a.logger.Warn("persist interrupted model step failed", slog.Any("error", err))
@@ -879,6 +947,21 @@ func (a *Agent) runStream(ctx context.Context, cfg RunConfig, ch chan<- StreamEv
 			cfg.InjectedRecorder,
 		)
 	}
+	// A final response can still discover a steer item at the commit
+	// boundary. Re-open the same run with the committed transcript so the
+	// steer becomes the next model input instead of being stranded after the
+	// terminal event.
+	if streamClosed && !aborted && streamResult != nil && cfg.ContinueAfterFinal != nil && cfg.ContinueAfterFinal.Swap(false) {
+		cfg = appendSteerContinuation(cfg, steerContinuationMessages(cfg, streamResult.Steps, committedStepMessages), len(streamResult.Steps))
+		// The completed invocation must stop its emitters before the continuation
+		// starts; the continuation gets a fresh child context from the original
+		// run context so closing the old stream does not cancel it.
+		cancel(context.Canceled)
+		eventGate.close()
+		continued = true
+		a.runStream(ctx, cfg, ch)
+		return
+	}
 	// Stop secondary producers before delivering the terminal event. The stream
 	// context cancellation also unblocks an emitter already waiting on ch.
 	cancel(context.Canceled)
@@ -893,6 +976,29 @@ func (a *Agent) runStream(ctx context.Context, cfg RunConfig, ch chan<- StreamEv
 	deliveryCtx, deliveryCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer deliveryCancel()
 	sendEvent(deliveryCtx, ch, termEvent)
+}
+
+// logContextLifecycle emits the one-line audit summary linking the context
+// view manifest to the final provider input: what was selected, what the
+// cache plan pinned, and which mutations ran after the view.
+func (a *Agent) logContextLifecycle(cfg RunConfig) {
+	if a == nil || a.logger == nil || cfg.ContextMutations == nil {
+		return
+	}
+	cacheOutcome := ""
+	if cfg.ContextLifecycle != nil {
+		if snapshot, ok := cfg.ContextLifecycle.Snapshot(); ok && snapshot.CacheComparison != nil {
+			cacheOutcome = snapshot.CacheComparison.Outcome
+		}
+	}
+	a.logger.Debug("context lifecycle",
+		slog.String("view", string(cfg.ContextManifest.View)),
+		slog.Int("manifest_items", len(cfg.ContextManifest.Items)),
+		slog.String("stable_prefix_hash", cfg.ContextCachePlan.StablePrefixHash),
+		slog.Int("mutations", len(cfg.ContextMutations.Records())),
+		slog.String("cache_outcome", cacheOutcome),
+		slog.String("final_input_hash", cfg.ContextMutations.FinalInputHash()),
+	)
 }
 
 // drainStreamUntilClosed consumes what the provider still has buffered after
@@ -935,6 +1041,9 @@ func (a *Agent) runGenerate(ctx context.Context, cfg RunConfig) (result *Generat
 			errMsg = retErr.Error()
 		}
 		a.runTurnHook(context.WithoutCancel(ctx), cfg, event, errMsg)
+	}()
+	defer func() {
+		a.logContextLifecycle(cfg)
 	}()
 	loopAbort := newLoopAbortState()
 
@@ -1004,7 +1113,9 @@ func (a *Agent) runGenerate(ctx context.Context, cfg RunConfig) (result *Generat
 		prepareStep = readMediaState.prepareStep
 	}
 
+	prepareStep = prepareQueuedSteer(prepareStep, cfg)
 	prepareStep, committedStepMessages := capturePreparedStepMessages(prepareStep)
+	committedStepMessages.byStep[0] = cloneProviderMessages(cfg.initialStepInputs)
 	if readMediaState != nil {
 		committedStepMessages.addAdmissionObserver(readMediaState.reconcilePreparedMessages)
 	}
@@ -1041,7 +1152,7 @@ func (a *Agent) runGenerate(ctx context.Context, cfg RunConfig) (result *Generat
 	)
 	if cfg.OnStepCommitted != nil {
 		opts = append(opts, sdk.WithOnStepCommitted(func(ctx context.Context, stepIndex int, step *sdk.StepResult) error {
-			return cfg.OnStepCommitted(ctx, stepIndex, committedStepMessages.decorate(stepIndex, step, toolExecutionMetadata))
+			return cfg.OnStepCommitted(ctx, cfg.StepIndexOffset+stepIndex, committedStepMessages.decorate(stepIndex, step, toolExecutionMetadata))
 		}))
 	}
 
@@ -1089,6 +1200,16 @@ func (a *Agent) runGenerate(ctx context.Context, cfg RunConfig) (result *Generat
 		finalMessages = readMediaState.mergeMessages(genResult.Steps, finalMessages, -1)
 	}
 	finalMessages = toolExecutionMetadata.annotate(finalMessages)
+	if cfg.ContinueAfterFinal != nil && cfg.ContinueAfterFinal.Swap(false) && len(genResult.Steps) > 0 {
+		cfg = appendSteerContinuation(cfg, steerContinuationMessages(cfg, genResult.Steps, committedStepMessages), len(genResult.Steps))
+		next, nextErr := a.runGenerate(genCtx, cfg)
+		if nextErr != nil {
+			return nil, nextErr
+		}
+		next.Messages = append(finalMessages, next.Messages...)
+		next.Text = strings.TrimSpace(strings.Join([]string{genResult.Text, next.Text}, "\n"))
+		return next, nil
+	}
 	return &GenerateResult{
 		Messages:    finalMessages,
 		Text:        genResult.Text,
@@ -1097,6 +1218,55 @@ func (a *Agent) runGenerate(ctx context.Context, cfg RunConfig) (result *Generat
 		Speeches:    speeches,
 		Usage:       &genResult.Usage,
 	}, nil
+}
+
+// appendSteerContinuation advances a completed invocation without changing its
+// run identity or replaying its start event. Both execution modes share this
+// input/step transition; their output delivery and finalizers remain separate.
+func appendSteerContinuation(cfg RunConfig, messages []sdk.Message, steps int) RunConfig {
+	appended := append([]sdk.Message(nil), messages...)
+	cfg.initialStepInputs = nil
+	if cfg.NextModelInputs != nil {
+		cfg.initialStepInputs = cloneProviderMessages(*cfg.NextModelInputs)
+		appended = append(appended, cfg.initialStepInputs...)
+		*cfg.NextModelInputs = nil
+	}
+	cfg.Messages = append(append([]sdk.Message(nil), cfg.Messages...), appended...)
+	cfg.StepIndexOffset += steps
+	cfg.SuppressAgentStart = true
+	if len(cfg.initialStepInputs) > 0 {
+		current := len(cfg.Messages) - 1
+		cfg.ContextCurrentUserMessageIndex = &current
+	}
+	if len(cfg.ContextSourceFrags) > 0 {
+		// The production applier renders typed sources, not cfg.Messages.
+		// Continue from the already-selected context and append this invocation's
+		// new messages, keeping system/workspace provenance intact.
+		frags := append([]contextfrag.ContextFrag(nil), cfg.ContextFrags...)
+		if len(frags) == 0 {
+			frags = append(frags, cfg.ContextSourceFrags...)
+		}
+		lastIndex := -1
+		for i := range frags {
+			if frags[i].Provenance.Index > lastIndex {
+				lastIndex = frags[i].Provenance.Index
+			}
+			if frags[i].Kind == contextfrag.KindCurrentUserMessage {
+				frags[i].Kind = contextfrag.KindConversationEvent
+				frags[i].Slot = contextfrag.SlotHistory
+			}
+		}
+		current := len(appended) - 1
+		added := contextfrag.CompileFrags(contextfrag.CompileInput{Scope: cfg.ContextScope, Messages: appended, CurrentUserMessageIndex: &current})
+		for i := range added {
+			added[i].ID = fmt.Sprintf("continuation.%d.%03d", cfg.StepIndexOffset, i)
+			added[i].Provenance.Index = lastIndex + 1 + i
+			added[i].Budget.Overflow = contextfrag.OverflowKeep
+		}
+		frags = append(frags, added...)
+		cfg.ContextSourceFrags = frags
+	}
+	return cfg
 }
 
 func (a *Agent) buildGenerateOptions(ctx context.Context, cfg RunConfig, tools []sdk.Tool, approvalTools []sdk.Tool, prepareStep func(*sdk.GenerateParams) *sdk.GenerateParams) []sdk.GenerateOption {
@@ -1201,6 +1371,9 @@ func (a *Agent) buildGenerateOptions(ctx context.Context, cfg RunConfig, tools [
 	}
 	opts = append(opts, sdk.WithPrepareStep(stepPrepare))
 
+	if key := models.PromptCacheKey(cfg.Model, cfg.PromptCacheTTL, cfg.Identity.SessionID); key != "" {
+		opts = append(opts, sdk.WithPromptCacheKey(key))
+	}
 	opts = append(opts, models.BuildReasoningOptions(models.SDKModelConfig{
 		ClientType:            models.ResolveClientType(cfg.Model),
 		ChatCompletionsCompat: cfg.ChatCompletionsCompat,
@@ -1242,6 +1415,7 @@ func prepareProviderAttempt(
 	}
 	inputAllowance := stepReselectionAllowance(cfg)
 	reselectionDetail := ""
+	protectedPruned := 0
 	if reselector != nil && prefixCount < len(params.Messages) {
 		beforeMessages := append([]sdk.Message(nil), params.Messages...)
 		selection := reselector(ctx, ContextStepSelectionInput{
@@ -1287,6 +1461,7 @@ func prepareProviderAttempt(
 			snapshot.Dropped = selection.Dropped
 			snapshot.Truncated = selection.Truncated
 			snapshot.DropReasons = copyDropReasons(selection.DropReasons)
+			protectedPruned = selection.ProtectedPruned
 			if selection.Dropped > 0 || selection.Truncated > 0 {
 				reselectionDetail = contextStepSelectionDetail(selection)
 			}
@@ -1302,7 +1477,7 @@ func prepareProviderAttempt(
 			inputAllowance,
 		))
 	}
-	stagePreparedProviderAttempt(ctx, handoff, snapshot, systemPrepended, reselectionDetail, provenance)
+	stagePreparedProviderAttempt(ctx, handoff, snapshot, systemPrepended, reselectionDetail, protectedPruned, provenance)
 	return params
 }
 
@@ -1312,13 +1487,14 @@ func stagePreparedProviderAttempt(
 	snapshot contextfrag.StepSnapshot,
 	systemPrepended bool,
 	reselectionDetail string,
+	protectedPruned int,
 	provenance preparedMessageProvenance,
 ) {
 	if !providerAttemptDispatchAllowed(ctx) {
 		handoff.reject(provenance)
 		return
 	}
-	handoff.stage(snapshot, systemPrepended, reselectionDetail, provenance)
+	handoff.stage(snapshot, systemPrepended, reselectionDetail, protectedPruned, provenance)
 }
 
 func providerAttemptEnvelopeOverflow(params *sdk.GenerateParams, allowance int) int {
@@ -1855,6 +2031,12 @@ func wrapPrepareStepWithForkSnapshot(
 // mid-stream error. It re-invokes StreamText with the accumulated messages
 // and drains the new stream into the same output channel.
 //
+// The retry loop keeps going while a re-invoked stream fails with another
+// retryable error: the SDK poisons an errored step without committing it, so
+// every attempt regenerates that step from the same committed boundary, and
+// stopping after the first retry would waste the progress later attempts could
+// still make (overloaded upstreams recover within seconds).
+//
 // sendCtx is used for sendEvent so consumer disconnect (parent ctx) still
 // controls channel back-pressure; streamCtx is passed to the SDK for the same
 // cancellation semantics as the main stream (including loop-detect cancel).
@@ -1888,10 +2070,29 @@ func (a *Agent) runMidStreamRetry(
 	// committed boundary, so it must not survive as a checkpoint. Retried
 	// steps are numbered from the offset the commit barrier already uses.
 	interruptedStep.rebase(stepOffset)
-	retryInput := retryProviderAttemptMessages(cfg, prevResult)
+	// lastAttempt stays the latest failed attempt's own (unmerged) result:
+	// providerAttemptState.retryInput indexes Steps by the call-local step
+	// index, so handing it a merged result would append the wrong step's tail.
+	lastAttempt := prevResult
+	retryInput := retryProviderAttemptMessages(cfg, lastAttempt)
 	accumulatedCount := len(prevResult.Messages)
+	// folded* accumulates the durable output of every attempt that failed
+	// retryably, so whichever way the loop exits (success, terminal error,
+	// budget exhaustion) the returned result preserves the full history.
+	foldedMessages := append([]sdk.Message(nil), prevResult.Messages...)
+	foldedSteps := append([]sdk.StepResult(nil), prevResult.Steps...)
+	// failResult returns the original result carrying everything committed so
+	// far; its drained stream is what the caller expects on an abort path.
+	failResult := func() *sdk.StreamResult {
+		prevResult.Messages = foldedMessages
+		prevResult.Steps = foldedSteps
+		return prevResult
+	}
 
-	retryCfg := DefaultRetryConfig()
+	retryCfg := cfg.Retry
+	if retryCfg.MaxAttempts <= 0 {
+		retryCfg = DefaultRetryConfig()
+	}
 	for attempt := 0; attempt < retryCfg.MaxAttempts; attempt++ {
 		a.logger.Warn("mid-stream error, retrying",
 			slog.Int("step", stepNumber),
@@ -1905,13 +2106,13 @@ func (a *Agent) runMidStreamRetry(
 			MaxAttempt: retryCfg.MaxAttempts,
 			RetryError: errMsg,
 		}) {
-			return prevResult, true
+			return failResult(), true
 		}
 
 		delay := retryDelay(attempt, retryCfg)
 		if delay > 0 {
 			if err := sleepWithContext(streamCtx, delay); err != nil {
-				return prevResult, true // aborted
+				return failResult(), true // aborted
 			}
 		}
 
@@ -1935,7 +2136,7 @@ func (a *Agent) runMidStreamRetry(
 			}))
 		}
 		if contextStepBudgetError(streamCtx) != nil {
-			return prevResult, true
+			return failResult(), true
 		}
 
 		retryResult, retryErr := a.client.StreamText(streamCtx, retryOpts...)
@@ -1951,6 +2152,7 @@ func (a *Agent) runMidStreamRetry(
 
 		// Drain the retry stream into the main event loop
 		aborted := false
+		retryableFailure := false
 		for retryPart := range retryResult.Stream {
 			if streamCtx.Err() != nil {
 				aborted = true
@@ -2049,53 +2251,84 @@ func (a *Agent) runMidStreamRetry(
 					aborted = true
 					break
 				}
-				errMsg := rp.Error.Error()
-				if isAskUserArgumentParseError(errMsg) {
+				partErrMsg := rp.Error.Error()
+				if isAskUserArgumentParseError(partErrMsg) {
 					continue
 				}
-				sendEvent(sendCtx, ch, StreamEvent{Type: EventError, Error: errMsg})
-				aborted = true
+				sendEvent(sendCtx, ch, StreamEvent{Type: EventError, Error: partErrMsg})
+				if isRetryableStreamError(rp.Error) {
+					// A retryable failure inside a retry must not end the run:
+					// fold what this attempt committed and take the next loop
+					// iteration instead of giving up after a single re-call.
+					errMsg = partErrMsg
+					retryableFailure = true
+				} else {
+					aborted = true
+				}
 			case *sdk.AbortPart:
 				aborted = true
 			case *sdk.FinishPart:
 				// handled after loop
 			}
-			if aborted {
+			if aborted || retryableFailure {
 				break
 			}
 		}
-		if aborted {
+		if aborted || retryableFailure {
 			for retryPart := range retryResult.Stream {
 				interruptedStep.observe(retryPart)
 			}
 		}
-		// Merge prev messages into retryResult so the caller sees the full
-		// accumulated history (initial run + retry continuation). The SDK's
+		if retryableFailure && !aborted {
+			// Fold this attempt's durable output and go again. The errored step
+			// was poisoned by the SDK without committing, so folded output never
+			// contains the partial tail the next attempt will regenerate.
+			foldedMessages = append(foldedMessages, retryResult.Messages...)
+			foldedSteps = append(foldedSteps, retryResult.Steps...)
+			stepOffset += len(retryResult.Steps)
+			accumulatedCount += len(retryResult.Messages)
+			lastAttempt = retryResult
+			interruptedStep.rebase(stepOffset)
+			if input, ok := cfg.providerAttemptState.retryInput(lastAttempt); ok {
+				retryInput = input
+			} else {
+				// Without a stored provider attempt (tests, defensive paths),
+				// rebuild from the folded history so earlier attempts' committed
+				// work still reaches the next call.
+				retryInput = retryProviderAttemptMessages(cfg, &sdk.StreamResult{
+					Messages: foldedMessages,
+					Steps:    foldedSteps,
+				})
+			}
+			continue
+		}
+		// Merge the folded history into retryResult so the caller sees the full
+		// accumulated history (initial run + every retry continuation). The SDK's
 		// StreamResult.Messages only contains messages produced within that
 		// StreamText call, so without this merge the original steps before
 		// the mid-stream error would be lost when the retry result becomes
 		// the new streamResult.
-		if len(prevResult.Messages) > 0 {
-			merged := make([]sdk.Message, 0, len(prevResult.Messages)+len(retryResult.Messages))
-			merged = append(merged, prevResult.Messages...)
+		if len(foldedMessages) > 0 {
+			merged := make([]sdk.Message, 0, len(foldedMessages)+len(retryResult.Messages))
+			merged = append(merged, foldedMessages...)
 			merged = append(merged, retryResult.Messages...)
 			retryResult.Messages = merged
 		}
-		if len(prevResult.Steps) > 0 {
-			retryResult.Steps = append(append([]sdk.StepResult(nil), prevResult.Steps...), retryResult.Steps...)
+		if len(foldedSteps) > 0 {
+			retryResult.Steps = append(append([]sdk.StepResult(nil), foldedSteps...), retryResult.Steps...)
 		}
 		return retryResult, aborted || detectGenerateLoopAbort(streamCtx, streamCtx.Err()) != nil
 	}
-	// All retry attempts failed to even start a new stream — return the
-	// previous (already drained) result so its accumulated messages are
-	// preserved as the final partial state. Publish the giving-up error: every
-	// EventRetry retracts the failure it retried, so without this last event a
-	// consumer would see the run end with nothing to explain why it stopped.
+	// All retry attempts failed — return the original result carrying every
+	// attempt's committed output so its accumulated messages are preserved as
+	// the final partial state. Publish the giving-up error: every EventRetry
+	// retracts the failure it retried, so without this last event a consumer
+	// would see the run end with nothing to explain why it stopped.
 	sendEvent(sendCtx, ch, StreamEvent{
 		Type:  EventError,
 		Error: fmt.Sprintf("mid-stream retry: all %d attempts failed (last: %s)", retryCfg.MaxAttempts, errMsg),
 	})
-	return prevResult, true
+	return failResult(), true
 }
 
 func prepareMidStreamRetryConfig(cfg RunConfig, accumulated []sdk.Message, errMsg string) RunConfig {

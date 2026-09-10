@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -28,7 +29,7 @@ const (
 type recordingContextLifecycleStore struct {
 	creates             []sqlc.CreateContextLifecycleParams
 	createErr           error
-	existing            *sqlc.ContextLifecycle
+	existing            *sqlc.GetContextLifecycleByRunIDRow
 	getErr              error
 	getCalls            int
 	updates             []sqlc.UpdateAbortedContextLifecycleSnapshotParams
@@ -52,17 +53,20 @@ type recordingContextLifecycleStore struct {
 func (s *recordingContextLifecycleStore) CreateContextLifecycle(
 	_ context.Context,
 	arg sqlc.CreateContextLifecycleParams,
-) (sqlc.ContextLifecycle, error) {
+) (sqlc.CreateContextLifecycleRow, error) {
 	s.creates = append(s.creates, arg)
 	if s.createErr != nil {
-		return sqlc.ContextLifecycle{}, s.createErr
+		return sqlc.CreateContextLifecycleRow{}, s.createErr
 	}
-	created := sqlc.ContextLifecycle{
+	created := sqlc.GetContextLifecycleByRunIDRow{
 		RunID: arg.RunID, BotID: arg.BotID, SessionID: arg.SessionID,
 		Status: arg.Status, ErrorCode: arg.ErrorCode, Snapshot: arg.Snapshot,
 	}
 	s.existing = &created
-	return created, nil
+	return sqlc.CreateContextLifecycleRow{
+		RunID: arg.RunID, BotID: arg.BotID, SessionID: arg.SessionID,
+		Status: arg.Status, ErrorCode: arg.ErrorCode,
+	}, nil
 }
 
 type lifecycleTurnAdmitter struct {
@@ -80,15 +84,6 @@ func (a *lifecycleTurnAdmitter) Admit(
 	return a.admission, nil
 }
 
-func (a *lifecycleTurnAdmitter) FinishRun(
-	_ context.Context,
-	handle sessionruntime.RunHandle,
-	status, message string,
-) error {
-	a.finishes = append(a.finishes, recordedFinish{handle: handle, status: status, message: message})
-	return a.finishErr
-}
-
 func (a *lifecycleTurnAdmitter) FinishRunWithErrorCode(
 	_ context.Context,
 	handle sessionruntime.RunHandle,
@@ -101,13 +96,13 @@ func (a *lifecycleTurnAdmitter) FinishRunWithErrorCode(
 func (s *recordingContextLifecycleStore) GetContextLifecycleByRunID(
 	_ context.Context,
 	_ pgtype.UUID,
-) (sqlc.ContextLifecycle, error) {
+) (sqlc.GetContextLifecycleByRunIDRow, error) {
 	s.getCalls++
 	if s.getErr != nil {
-		return sqlc.ContextLifecycle{}, s.getErr
+		return sqlc.GetContextLifecycleByRunIDRow{}, s.getErr
 	}
 	if s.existing == nil {
-		return sqlc.ContextLifecycle{}, pgx.ErrNoRows
+		return sqlc.GetContextLifecycleByRunIDRow{}, pgx.ErrNoRows
 	}
 	return *s.existing, nil
 }
@@ -138,34 +133,37 @@ func (s *recordingContextLifecycleStore) GetLatestAssistantContextLifecycleByRun
 func (s *recordingContextLifecycleStore) UpdateAbortedContextLifecycleSnapshot(
 	_ context.Context,
 	arg sqlc.UpdateAbortedContextLifecycleSnapshotParams,
-) (sqlc.ContextLifecycle, error) {
+) (sqlc.UpdateAbortedContextLifecycleSnapshotRow, error) {
 	s.updates = append(s.updates, arg)
-	return sqlc.ContextLifecycle{}, s.updateErr
+	return sqlc.UpdateAbortedContextLifecycleSnapshotRow{}, s.updateErr
 }
 
 func (s *recordingContextLifecycleStore) UpsertAbortedContextLifecycle(
 	_ context.Context,
 	arg sqlc.UpsertAbortedContextLifecycleParams,
-) (sqlc.ContextLifecycle, error) {
+) (sqlc.UpsertAbortedContextLifecycleRow, error) {
 	s.upserts = append(s.upserts, arg)
-	return sqlc.ContextLifecycle{}, s.upsertErr
+	return sqlc.UpsertAbortedContextLifecycleRow{}, s.upsertErr
 }
 
 func (s *recordingContextLifecycleStore) UpsertTerminalContextLifecycle(
 	ctx context.Context,
 	arg sqlc.UpsertTerminalContextLifecycleParams,
-) (sqlc.ContextLifecycle, error) {
+) (sqlc.UpsertTerminalContextLifecycleRow, error) {
 	_, s.terminalUpsertBound = ctx.Deadline()
 	s.terminalUpserts = append(s.terminalUpserts, arg)
 	if s.terminalUpsertErr != nil {
-		return sqlc.ContextLifecycle{}, s.terminalUpsertErr
+		return sqlc.UpsertTerminalContextLifecycleRow{}, s.terminalUpsertErr
 	}
-	upserted := sqlc.ContextLifecycle{
+	upserted := sqlc.GetContextLifecycleByRunIDRow{
 		RunID: arg.RunID, BotID: arg.BotID, SessionID: arg.SessionID,
 		Status: arg.Status, ErrorCode: arg.ErrorCode, Snapshot: arg.Snapshot,
 	}
 	s.existing = &upserted
-	return upserted, nil
+	return sqlc.UpsertTerminalContextLifecycleRow{
+		RunID: arg.RunID, BotID: arg.BotID, SessionID: arg.SessionID,
+		Status: arg.Status, ErrorCode: arg.ErrorCode,
+	}, nil
 }
 
 func (s *recordingContextLifecycleStore) ListTerminalSessionRunsNeedingContextLifecycle(
@@ -182,7 +180,11 @@ func (s *recordingContextLifecycleStore) ListTerminalSessionRunsNeedingContextLi
 	return append([]sqlc.ListTerminalSessionRunsNeedingContextLifecycleRow(nil), s.terminalRows...), s.terminalListErr
 }
 
-func lifecycleTestRunConfig() native.RunConfig {
+func lifecycleTestRunConfig(mutations ...contextfrag.MutationRecord) native.RunConfig {
+	ledger := contextfrag.NewMutationLedger()
+	for _, mutation := range mutations {
+		ledger.Record(mutation.Kind, mutation.Detail)
+	}
 	holder := contextfrag.NewLifecycleHolder()
 	holder.SetManifest(contextfrag.Manifest{
 		View: contextfrag.ViewRunConfigPreProvider,
@@ -191,7 +193,8 @@ func lifecycleTestRunConfig() native.RunConfig {
 			Messages:  1,
 			TextBytes: 64,
 		},
-		Items: []contextfrag.ManifestItem{{ID: "private-content-marker"}},
+		Items:     []contextfrag.ManifestItem{{ID: "private-content-marker"}},
+		Mutations: ledger,
 	})
 	return native.RunConfig{
 		RunID: lifecycleTestRunID,
@@ -226,13 +229,14 @@ func TestContextLifecycleTerminalWritesAdmittedRunExactlyOnce(t *testing.T) {
 	}
 }
 
-func TestContextLifecycleTerminalClassifiesOnlyCurrentStackOutcomes(t *testing.T) {
+func TestContextLifecycleTerminalClassifiesTerminalState(t *testing.T) {
 	canceledCtx, cancel := context.WithCancelCause(context.Background())
 	cancel(context.Canceled)
 
 	tests := []struct {
 		name      string
 		ctx       context.Context
+		mutations []contextfrag.MutationRecord
 		cause     error
 		status    string
 		errorCode string
@@ -244,6 +248,47 @@ func TestContextLifecycleTerminalClassifiesOnlyCurrentStackOutcomes(t *testing.T
 			cause:     apperror.New(apperror.CodeWorkspaceUnreachable, nil),
 			status:    contextLifecycleStatusFailedProvider,
 			errorCode: string(apperror.CodeWorkspaceUnreachable),
+		},
+		{
+			name: "budget failure mutation",
+			mutations: []contextfrag.MutationRecord{{
+				Kind:   contextfrag.MutationContextBudgetFailure,
+				Detail: "protected_context_overflow",
+			}},
+			cause:     fmt.Errorf("private detail: %w", contextfrag.ErrProtectedContextOverflow),
+			status:    contextLifecycleStatusFailedBudget,
+			errorCode: string(apperror.CodeContextProtectedOverflow),
+		},
+		{
+			name: "budget failure mutation without error",
+			mutations: []contextfrag.MutationRecord{{
+				Kind:   contextfrag.MutationContextBudgetFailure,
+				Detail: "budget_unsatisfied",
+			}},
+			status:    contextLifecycleStatusFailedBudget,
+			errorCode: string(apperror.CodeContextBudgetUnsatisfied),
+		},
+		{
+			name:      "typed budget failure without mutation",
+			cause:     fmt.Errorf("private detail: %w", contextfrag.ErrBudgetUnsatisfied),
+			status:    contextLifecycleStatusFailedBudget,
+			errorCode: string(apperror.CodeContextBudgetUnsatisfied),
+		},
+		{
+			name:      "stable protected overflow code without sentinel",
+			cause:     apperror.New(apperror.CodeContextProtectedOverflow, nil),
+			status:    contextLifecycleStatusFailedBudget,
+			errorCode: string(apperror.CodeContextProtectedOverflow),
+		},
+		{
+			name: "typed budget failure behind stable application error",
+			cause: apperror.Wrap(
+				apperror.CodeContextBudgetUnsatisfied,
+				contextfrag.ErrBudgetUnsatisfied,
+				nil,
+			),
+			status:    contextLifecycleStatusFailedBudget,
+			errorCode: string(apperror.CodeContextBudgetUnsatisfied),
 		},
 		{
 			name:   "provider cancellation while owner remains active",
@@ -263,13 +308,58 @@ func TestContextLifecycleTerminalClassifiesOnlyCurrentStackOutcomes(t *testing.T
 			cause:  apperror.Wrap(apperror.CodeWorkspaceUnreachable, context.Canceled, nil),
 			status: contextLifecycleStatusAborted,
 		},
+		{
+			name: "fallback",
+			ctx:  context.Background(),
+			mutations: []contextfrag.MutationRecord{{
+				Kind:   contextfrag.MutationContextViewFallback,
+				Detail: "collector_error",
+			}},
+			status: contextLifecycleStatusFallback,
+		},
+		{
+			name: "provider failure outranks fallback",
+			ctx:  context.Background(),
+			mutations: []contextfrag.MutationRecord{{
+				Kind: contextfrag.MutationContextViewFallback,
+			}},
+			cause:  errors.New("private upstream failure"),
+			status: contextLifecycleStatusFailedProvider,
+		},
+		{
+			name: "explicit abort outranks fallback",
+			ctx:  canceledCtx,
+			mutations: []contextfrag.MutationRecord{{
+				Kind: contextfrag.MutationContextViewFallback,
+			}},
+			cause:  context.Canceled,
+			status: contextLifecycleStatusAborted,
+		},
+		{
+			name: "budget failure outranks explicit abort",
+			ctx:  canceledCtx,
+			mutations: []contextfrag.MutationRecord{{
+				Kind:   contextfrag.MutationContextBudgetFailure,
+				Detail: "protected_context_overflow",
+			}},
+			cause:     context.Canceled,
+			status:    contextLifecycleStatusFailedBudget,
+			errorCode: string(apperror.CodeContextProtectedOverflow),
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			status, code := classifyContextLifecycleTerminal(tt.ctx, tt.cause)
-			if status != tt.status || code != tt.errorCode {
-				t.Fatalf("classifyContextLifecycleTerminal() = (%q, %q), want (%q, %q)", status, code, tt.status, tt.errorCode)
+			store := &recordingContextLifecycleStore{}
+			service := &Service{contextLifecycles: store}
+			service.contextLifecycleTerminal(tt.ctx, lifecycleTestRunConfig(tt.mutations...))(tt.cause)
+
+			if len(store.creates) != 1 {
+				t.Fatalf("CreateContextLifecycle calls = %d, want 1", len(store.creates))
+			}
+			got := store.creates[0]
+			if got.Status != tt.status || got.ErrorCode.String != tt.errorCode || got.ErrorCode.Valid != (tt.errorCode != "") {
+				t.Fatalf("terminal classification = (%q, %#v), want (%q, %q)", got.Status, got.ErrorCode, tt.status, tt.errorCode)
 			}
 		})
 	}
@@ -299,7 +389,7 @@ func TestEnsureTerminalContextLifecycleCreatesMinimalFallbackOnlyWhenMissing(t *
 	if err := json.Unmarshal(row.Snapshot, &snapshot); err != nil {
 		t.Fatalf("decode fallback snapshot: %v", err)
 	}
-	if snapshot.Version != 1 || snapshot.Counts != (contextfrag.ManifestCounts{}) {
+	if snapshot.Version != contextfrag.LifecycleSnapshotVersion || snapshot.Counts != (contextfrag.ManifestCounts{}) {
 		t.Fatalf("minimal fallback snapshot = %#v", snapshot)
 	}
 
@@ -312,7 +402,7 @@ func TestEnsureTerminalContextLifecycleCreatesMinimalFallbackOnlyWhenMissing(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.existing = &sqlc.ContextLifecycle{RunID: runUUID, BotID: botUUID, SessionID: sessionUUID}
+	store.existing = &sqlc.GetContextLifecycleByRunIDRow{RunID: runUUID, BotID: botUUID, SessionID: sessionUUID}
 	service.EnsureTerminalContextLifecycle(
 		context.Background(),
 		lifecycleTestRunID,
@@ -347,7 +437,7 @@ func TestAuthoritativeSnapshotReplacesOnlyRecoveredAbortedFallback(t *testing.T)
 	}
 	store := &recordingContextLifecycleStore{
 		createErr: &pgconn.PgError{Code: "23505"},
-		existing: &sqlc.ContextLifecycle{
+		existing: &sqlc.GetContextLifecycleByRunIDRow{
 			RunID: runUUID, BotID: botUUID, SessionID: sessionUUID,
 			Status: contextLifecycleStatusAborted,
 		},
@@ -441,7 +531,7 @@ func TestSubagentTerminalPersistsSnapshotAndPreContextFallbackExactlyOnce(t *tes
 			},
 			wantStatus:   contextLifecycleStatusCompleted,
 			wantFinish:   sessionruntime.RunStatusCompleted,
-			wantSnapshot: contextfrag.LifecycleSnapshot{Version: 1},
+			wantSnapshot: contextfrag.LifecycleSnapshot{Version: contextfrag.LifecycleSnapshotVersion},
 		},
 		{
 			name: "failure before context",
@@ -450,7 +540,7 @@ func TestSubagentTerminalPersistsSnapshotAndPreContextFallbackExactlyOnce(t *tes
 			},
 			wantStatus:   contextLifecycleStatusFailedProvider,
 			wantFinish:   sessionruntime.RunStatusErrored,
-			wantSnapshot: contextfrag.LifecycleSnapshot{Version: 1},
+			wantSnapshot: contextfrag.LifecycleSnapshot{Version: contextfrag.LifecycleSnapshotVersion},
 		},
 	}
 	for _, tt := range tests {
@@ -595,7 +685,7 @@ func TestRecoverContextLifecycleFromAssistantMetadataSkipsExistingOrUnavailable(
 	}{
 		{
 			name: "existing lifecycle",
-			store: &recordingContextLifecycleStore{existing: &sqlc.ContextLifecycle{
+			store: &recordingContextLifecycleStore{existing: &sqlc.GetContextLifecycleByRunIDRow{
 				RunID: runID, BotID: botID, SessionID: sessionID,
 			}},
 		},
@@ -647,3 +737,78 @@ func TestRecoverContextLifecycleFromAssistantMetadataCountsStoreErrorsAndSkipsOw
 		t.Fatalf("ownership-lost recovery touched store: gets=%d creates=%d", ownershipStore.getCalls, len(ownershipStore.creates))
 	}
 }
+
+func TestBudgetOverAbortKeepsAbortTraceInSnapshot(t *testing.T) {
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	tests := []struct {
+		name      string
+		ctx       context.Context
+		mutations []contextfrag.MutationRecord
+		cause     error
+		status    string
+		wantTrace bool
+	}{
+		{
+			name: "budget win over explicit abort records the abort trace",
+			ctx:  canceledCtx,
+			mutations: []contextfrag.MutationRecord{{
+				Kind:   contextfrag.MutationContextBudgetFailure,
+				Detail: "protected_context_overflow",
+			}},
+			cause:     context.Canceled,
+			status:    contextLifecycleStatusFailedBudget,
+			wantTrace: true,
+		},
+		{
+			name: "budget failure without cancellation stays trace-free",
+			ctx:  context.Background(),
+			mutations: []contextfrag.MutationRecord{{
+				Kind:   contextfrag.MutationContextBudgetFailure,
+				Detail: "budget_unsatisfied",
+			}},
+			cause:     contextfrag.ErrBudgetUnsatisfied,
+			status:    contextLifecycleStatusFailedBudget,
+			wantTrace: false,
+		},
+		{
+			name:      "plain abort needs no trace",
+			ctx:       canceledCtx,
+			cause:     context.Canceled,
+			status:    contextLifecycleStatusAborted,
+			wantTrace: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &recordingContextLifecycleStore{}
+			service := &Service{contextLifecycles: store}
+			service.contextLifecycleTerminal(tt.ctx, lifecycleTestRunConfig(tt.mutations...))(tt.cause)
+
+			if len(store.creates) != 1 {
+				t.Fatalf("CreateContextLifecycle calls = %d, want 1", len(store.creates))
+			}
+			got := store.creates[0]
+			if got.Status != tt.status {
+				t.Fatalf("status = %q, want %q", got.Status, tt.status)
+			}
+			var snapshot contextfrag.LifecycleSnapshot
+			if err := json.Unmarshal(got.Snapshot, &snapshot); err != nil {
+				t.Fatalf("unmarshal snapshot: %v", err)
+			}
+			hasTrace := false
+			for _, mutation := range snapshot.Mutations {
+				if mutation.Kind == contextfrag.MutationRunAbortObserved {
+					hasTrace = true
+				}
+			}
+			if hasTrace != tt.wantTrace {
+				t.Fatalf("abort trace = %v, want %v (mutations %#v)", hasTrace, tt.wantTrace, snapshot.Mutations)
+			}
+		})
+	}
+}
+
+func (*lifecycleTurnAdmitter) MarkInlineDecisionRun(string, string, string) {}

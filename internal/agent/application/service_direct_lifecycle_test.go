@@ -82,11 +82,11 @@ type synchronizedLifecycleStore struct {
 func (s *synchronizedLifecycleStore) CreateContextLifecycle(
 	ctx context.Context,
 	arg sqlc.CreateContextLifecycleParams,
-) (sqlc.ContextLifecycle, error) {
+) (sqlc.CreateContextLifecycleRow, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.store.existing != nil {
-		return sqlc.ContextLifecycle{}, &pgconn.PgError{Code: "23505"}
+		return sqlc.CreateContextLifecycleRow{}, &pgconn.PgError{Code: "23505"}
 	}
 	return s.store.CreateContextLifecycle(ctx, arg)
 }
@@ -94,7 +94,7 @@ func (s *synchronizedLifecycleStore) CreateContextLifecycle(
 func (s *synchronizedLifecycleStore) GetContextLifecycleByRunID(
 	ctx context.Context,
 	runID pgtype.UUID,
-) (sqlc.ContextLifecycle, error) {
+) (sqlc.GetContextLifecycleByRunIDRow, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.store.GetContextLifecycleByRunID(ctx, runID)
@@ -112,7 +112,7 @@ func (s *synchronizedLifecycleStore) GetLatestAssistantContextLifecycleMetadataB
 func (s *synchronizedLifecycleStore) UpdateAbortedContextLifecycleSnapshot(
 	ctx context.Context,
 	arg sqlc.UpdateAbortedContextLifecycleSnapshotParams,
-) (sqlc.ContextLifecycle, error) {
+) (sqlc.UpdateAbortedContextLifecycleSnapshotRow, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	row, err := s.store.UpdateAbortedContextLifecycleSnapshot(ctx, arg)
@@ -130,7 +130,7 @@ func (s *synchronizedLifecycleStore) UpdateAbortedContextLifecycleSnapshot(
 func (s *synchronizedLifecycleStore) UpsertAbortedContextLifecycle(
 	ctx context.Context,
 	arg sqlc.UpsertAbortedContextLifecycleParams,
-) (sqlc.ContextLifecycle, error) {
+) (sqlc.UpsertAbortedContextLifecycleRow, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.store.UpsertAbortedContextLifecycle(ctx, arg)
@@ -139,7 +139,7 @@ func (s *synchronizedLifecycleStore) UpsertAbortedContextLifecycle(
 func (s *synchronizedLifecycleStore) UpsertTerminalContextLifecycle(
 	ctx context.Context,
 	arg sqlc.UpsertTerminalContextLifecycleParams,
-) (sqlc.ContextLifecycle, error) {
+) (sqlc.UpsertTerminalContextLifecycleRow, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.store.UpsertTerminalContextLifecycle(ctx, arg)
@@ -377,7 +377,7 @@ func assertDirectLifecycle(
 	if err := json.Unmarshal(row.Snapshot, &snapshot); err != nil {
 		t.Fatalf("decode lifecycle snapshot: %v", err)
 	}
-	if snapshot.Version != 1 || snapshot.View == "" || snapshot.AssistantMessageID != wantAssistantID {
+	if snapshot.Version != contextfrag.LifecycleSnapshotVersion || snapshot.View == "" || snapshot.AssistantMessageID != wantAssistantID {
 		t.Fatalf("lifecycle snapshot = %#v, want authoritative version 1 and assistant %q", snapshot, wantAssistantID)
 	}
 }
@@ -471,5 +471,49 @@ func TestAdmittedStreamCancellationPersistsAbortedLifecycle(t *testing.T) {
 	assertDirectLifecycle(t, fixture.lifecycles, lifecycleTestRunID, contextLifecycleStatusAborted, "")
 	if len(fixture.runtime.finishes) != 1 || fixture.runtime.finishes[0].status != sessionruntime.RunStatusAborted {
 		t.Fatalf("runtime finishes = %#v, want one aborted finish", fixture.runtime.finishes)
+	}
+}
+
+func TestAdmittedStreamWithholdsTerminalWhenHistoryPersistenceFails(t *testing.T) {
+	fixture := newDirectLifecycleFixture(t, directLifecycleModelSuccess)
+	persistErr := errors.New("history unavailable")
+	fixture.messages.roundPersistErr = persistErr
+
+	var publishedMu sync.Mutex
+	var published []native.StreamEvent
+	fixture.service.publishTurnEvent = func(_ context.Context, _ sessionruntime.RunHandle, event native.StreamEvent) error {
+		publishedMu.Lock()
+		defer publishedMu.Unlock()
+		published = append(published, event)
+		return nil
+	}
+
+	handle, err := fixture.service.StartTurn(context.Background(), turn.StartTurnCommand{
+		SchemaVersion:        1,
+		TeamID:               "direct-lifecycle-team",
+		Mode:                 turn.ModeChat,
+		BotID:                lifecycleTestBotID,
+		ChatID:               lifecycleTestBotID,
+		ThreadID:             lifecycleTestSessionID,
+		Query:                directLifecyclePrompt,
+		UserMessagePersisted: true,
+	})
+	if err != nil {
+		t.Fatalf("StartTurn() error = %v", err)
+	}
+	for range handle.Events() {
+	}
+	for range handle.Errs() {
+	}
+
+	if len(fixture.runtime.finishes) != 1 || fixture.runtime.finishes[0].status != sessionruntime.RunStatusErrored {
+		t.Fatalf("runtime finishes = %#v, want one errored finish", fixture.runtime.finishes)
+	}
+	publishedMu.Lock()
+	defer publishedMu.Unlock()
+	for _, event := range published {
+		if event.IsTerminal() {
+			t.Fatalf("terminal event %q was published after failed history persistence", event.Type)
+		}
 	}
 }

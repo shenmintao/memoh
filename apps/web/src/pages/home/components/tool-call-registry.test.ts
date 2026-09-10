@@ -91,6 +91,13 @@ function toolBlock(toolName: string, input: Record<string, unknown> = {}): ToolC
 }
 
 describe('tool call registry', () => {
+  it('uses a command description without a redundant Run prefix, with command fallback', () => {
+    expect(getToolDisplay(toolBlock('exec', { command: 'cat /etc/resolv.conf', description: 'Read DNS configuration' })))
+      .toMatchObject({ target: 'Read DNS configuration', hideAction: true })
+    expect(getToolDisplay(toolBlock('exec', { command: 'echo done', description: '  ' })))
+      .toMatchObject({ target: 'echo done', hideAction: false })
+  })
+
   it('reads the backend tool catalog', () => {
     expect(BUILT_IN_TOOLS.length).toBeGreaterThan(40)
     expect(BUILT_IN_TOOLS).toContain('browser_action')
@@ -141,14 +148,22 @@ describe('tool call registry', () => {
       .toBe('browserAction.scroll')
   })
 
-  it('marks failed calls, including a non-zero exec exit', () => {
-    expect(getToolDisplay(toolBlock('exec', { command: 'false' })).isError).toBeUndefined()
+  it.each([
+    { exit_code: -1 },
+    { exit_code: 1 },
+    { structuredContent: { exitCode: 127 } },
+    { isError: true },
+    { structuredContent: { isError: true, exit_code: -1 } },
+  ])('keeps recoverable execution failures out of the title: %j', (result) => {
+    const block = toolBlock('exec', { command: 'false', description: 'Check environment' })
+    const failed = { ...block, result } as ToolCallBlock
+    expect(getToolDisplay(failed)).toEqual(getToolDisplay(block))
+    expect(failed.result).toBe(result)
+  })
 
-    const failedExec = { ...toolBlock('exec', { command: 'false' }), result: { exit_code: 1 } } as ToolCallBlock
-    expect(getToolDisplay(failedExec).isError).toBe(true)
-    expect(getToolDisplay(failedExec).exitCode).toBe(1)
-
-    const failedTool = { ...toolBlock('web_search', { query: 'x' }), result: { isError: true } } as ToolCallBlock
-    expect(getToolDisplay(failedTool).isError).toBe(true)
+  it('keeps other tool failures in their details', () => {
+    const block = toolBlock('web_search', { query: 'x' })
+    expect(getToolDisplay({ ...block, result: { isError: true } } as ToolCallBlock))
+      .toEqual(getToolDisplay(block))
   })
 })

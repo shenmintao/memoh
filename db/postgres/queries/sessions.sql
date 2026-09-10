@@ -1,6 +1,6 @@
 -- name: CreateSession :one
 INSERT INTO bot_sessions (
-  bot_id, bot_agent_id, route_id, channel_type, type, session_mode, runtime_type, visibility, runtime_metadata, title, metadata, parent_session_id, created_by_user_id, workdir_id
+  bot_id, bot_agent_id, route_id, channel_type, type, session_mode, runtime_type, visibility, runtime_metadata, title, metadata, parent_session_id, created_by_user_id, workdir_id, preferred_chat_model_id, preferred_reasoning_effort
 )
 VALUES (
   sqlc.arg(bot_id),
@@ -16,7 +16,9 @@ VALUES (
   sqlc.arg(metadata),
   sqlc.narg(parent_session_id)::uuid,
   sqlc.narg(created_by_user_id)::uuid,
-  sqlc.narg(workdir_id)::uuid
+  sqlc.narg(workdir_id)::uuid,
+  sqlc.narg(preferred_chat_model_id)::uuid,
+  sqlc.narg(preferred_reasoning_effort)::text
 )
 RETURNING *;
 
@@ -123,7 +125,10 @@ created_session AS (
     metadata,
     next_turn_position,
     created_by_user_id,
-    workdir_id
+    workdir_id,
+    preferred_chat_model_id,
+    preferred_reasoning_effort,
+    preferred_external_model_id
   )
   SELECT
     fp.bot_id,
@@ -134,7 +139,10 @@ created_session AS (
     fp.runtime_type,
     -- A fork of a user-visible session is itself user-visible.
     fp.visibility,
-    fp.runtime_metadata,
+    -- External runtimes fork their own runtime-side session: the caller
+    -- passes the new driver-owned keys (e.g. the forked codex thread id) so
+    -- the two Memoh sessions never share one runtime session.
+    COALESCE(sqlc.narg(runtime_metadata_override), fp.runtime_metadata) AS runtime_metadata,
     sqlc.arg(title),
     jsonb_set(
       pm.value,
@@ -149,7 +157,13 @@ created_session AS (
     sqlc.narg(created_by_user_id)::uuid,
     -- A fork continues the source conversation, so it stays in the same
     -- workdir (and therefore the same working directory).
-    fp.workdir_id
+    fp.workdir_id,
+    -- The fork inherits the source's model preference pair (issue #879): it
+    -- continues the same conversation, so it should look and resolve the
+    -- same way on open.
+    fp.preferred_chat_model_id,
+    fp.preferred_reasoning_effort,
+    fp.preferred_external_model_id
   FROM fork_plan fp
   CROSS JOIN prepared_metadata pm
   RETURNING *
@@ -235,6 +249,7 @@ SELECT cs.*
 FROM created_session cs
 CROSS JOIN (SELECT count(*) AS copied_asset_count FROM copied_assets) copied_asset_counts;
 
+
 -- name: GetSessionByID :one
 SELECT *
 FROM bot_sessions
@@ -298,7 +313,7 @@ FOR UPDATE;
 -- name: ListSessionsByBot :many
 SELECT
   s.id, s.bot_id, s.bot_agent_id, s.route_id, s.channel_type, s.type, s.session_mode, s.runtime_type, s.visibility, s.runtime_metadata, s.title, s.metadata,
-  s.parent_session_id, s.created_by_user_id, s.workdir_id, s.created_at, s.updated_at, s.deleted_at
+  s.parent_session_id, s.created_by_user_id, s.workdir_id, s.created_at, s.updated_at, s.deleted_at, s.preferred_chat_model_id, s.preferred_reasoning_effort, s.preferred_external_model_id, s.model_preference_revision
 FROM bot_sessions s
 WHERE s.team_id = public.memoh_current_team_id()
   AND s.bot_id = sqlc.arg(bot_id)
@@ -308,7 +323,7 @@ ORDER BY s.updated_at DESC;
 -- name: ListSessionsByBotAndCreatedByUser :many
 SELECT
   s.id, s.bot_id, s.bot_agent_id, s.route_id, s.channel_type, s.type, s.session_mode, s.runtime_type, s.visibility, s.runtime_metadata, s.title, s.metadata,
-  s.parent_session_id, s.created_by_user_id, s.workdir_id, s.created_at, s.updated_at, s.deleted_at
+  s.parent_session_id, s.created_by_user_id, s.workdir_id, s.created_at, s.updated_at, s.deleted_at, s.preferred_chat_model_id, s.preferred_reasoning_effort, s.preferred_external_model_id, s.model_preference_revision
 FROM bot_sessions s
 WHERE s.team_id = public.memoh_current_team_id()
   AND s.bot_id = sqlc.arg(bot_id)
@@ -324,7 +339,7 @@ ORDER BY s.updated_at DESC;
 -- (workdir_unassigned) for the sidebar's ungrouped bucket.
 SELECT
   s.id, s.bot_id, s.bot_agent_id, s.route_id, s.channel_type, s.type, s.session_mode, s.runtime_type, s.visibility, s.runtime_metadata, s.title, s.metadata,
-  s.parent_session_id, s.created_by_user_id, s.workdir_id, s.created_at, s.updated_at, s.deleted_at
+  s.parent_session_id, s.created_by_user_id, s.workdir_id, s.created_at, s.updated_at, s.deleted_at, s.preferred_chat_model_id, s.preferred_reasoning_effort, s.preferred_external_model_id, s.model_preference_revision
 FROM bot_sessions s
 WHERE s.team_id = public.memoh_current_team_id()
   AND s.bot_id = sqlc.arg(bot_id)
@@ -355,7 +370,7 @@ LIMIT sqlc.arg(limit_count)::int;
 -- name: ListSessionsByBotAndCreatedByUserPaged :many
 SELECT
   s.id, s.bot_id, s.bot_agent_id, s.route_id, s.channel_type, s.type, s.session_mode, s.runtime_type, s.visibility, s.runtime_metadata, s.title, s.metadata,
-  s.parent_session_id, s.created_by_user_id, s.workdir_id, s.created_at, s.updated_at, s.deleted_at
+  s.parent_session_id, s.created_by_user_id, s.workdir_id, s.created_at, s.updated_at, s.deleted_at, s.preferred_chat_model_id, s.preferred_reasoning_effort, s.preferred_external_model_id, s.model_preference_revision
 FROM bot_sessions s
 WHERE s.team_id = public.memoh_current_team_id()
   AND s.bot_id = sqlc.arg(bot_id)
@@ -414,6 +429,23 @@ SET metadata = sqlc.arg(metadata), updated_at = now()
 WHERE team_id = public.memoh_current_team_id() AND id = sqlc.arg(id) AND deleted_at IS NULL
 RETURNING *;
 
+-- name: UpdateSessionRuntimeMetadata :one
+-- The runtime_type guard makes the merge a no-op when the session was
+-- concurrently switched to another runtime: driver-owned keys must never be
+-- written into a session that no longer belongs to that driver. The fencing
+-- guard rejects a superseded owner's late write: after a cluster ownership
+-- handoff the old owner's turn still finishes and reports its runtime
+-- metadata, and letting it land would point the session at a stale runtime
+-- thread. A NULL token skips the guard for callers outside any run.
+UPDATE bot_sessions
+SET runtime_metadata = sqlc.arg(runtime_metadata), updated_at = now()
+WHERE team_id = public.memoh_current_team_id()
+  AND id = sqlc.arg(id)
+  AND runtime_type = sqlc.arg(runtime_type)
+  AND (sqlc.narg(fencing_token)::bigint IS NULL OR runtime_fencing_token <= sqlc.narg(fencing_token)::bigint)
+  AND deleted_at IS NULL
+RETURNING *;
+
 -- name: UpdateSessionMetadataWithRuntimeFence :one
 UPDATE bot_sessions
 SET metadata = sqlc.arg(metadata), updated_at = now()
@@ -425,6 +457,8 @@ WHERE team_id = public.memoh_current_team_id()
 RETURNING *;
 
 -- name: UpdateSessionTypeAndMetadata :one
+-- A different runtime or Agent owns a different model namespace. Clear the
+-- old preference and invalidate pending picker writes when changing it.
 UPDATE bot_sessions
 SET type = sqlc.arg(type),
     session_mode = sqlc.arg(session_mode),
@@ -432,6 +466,14 @@ SET type = sqlc.arg(type),
     bot_agent_id = sqlc.arg(bot_agent_id),
     runtime_metadata = sqlc.arg(runtime_metadata),
     metadata = sqlc.arg(metadata),
+    preferred_chat_model_id = CASE WHEN runtime_type IS DISTINCT FROM sqlc.arg(runtime_type) OR bot_agent_id IS DISTINCT FROM sqlc.arg(bot_agent_id)
+      THEN NULL ELSE preferred_chat_model_id END,
+    preferred_external_model_id = CASE WHEN runtime_type IS DISTINCT FROM sqlc.arg(runtime_type) OR bot_agent_id IS DISTINCT FROM sqlc.arg(bot_agent_id)
+      THEN NULL ELSE preferred_external_model_id END,
+    preferred_reasoning_effort = CASE WHEN runtime_type IS DISTINCT FROM sqlc.arg(runtime_type) OR bot_agent_id IS DISTINCT FROM sqlc.arg(bot_agent_id)
+      THEN NULL ELSE preferred_reasoning_effort END,
+    model_preference_revision = CASE WHEN runtime_type IS DISTINCT FROM sqlc.arg(runtime_type) OR bot_agent_id IS DISTINCT FROM sqlc.arg(bot_agent_id)
+      THEN gen_random_uuid() ELSE model_preference_revision END,
     runtime_config_epoch = runtime_config_epoch + 1,
     updated_at = now()
 WHERE team_id = public.memoh_current_team_id() AND id = sqlc.arg(id) AND deleted_at IS NULL
@@ -453,20 +495,20 @@ WITH invalidated_session AS MATERIALIZED (
   RETURNING id
 ),
 deleted_acp_states AS (
-  DELETE FROM acp_session_states state
+  DELETE FROM agent_session_states state
   USING invalidated_session invalidated
   WHERE state.team_id = public.memoh_current_team_id()
     AND state.session_id = invalidated.id
   RETURNING state.session_id
 ),
 deleted_acp_lines AS (
-  DELETE FROM acp_session_state_lines line
+  DELETE FROM agent_session_state_lines line
   USING invalidated_session invalidated
   WHERE line.team_id = public.memoh_current_team_id()
     AND line.session_id = invalidated.id
   RETURNING line.session_id
 )
-DELETE FROM acp_session_publications publication
+DELETE FROM agent_session_publications publication
 USING invalidated_session invalidated
 WHERE publication.team_id = public.memoh_current_team_id()
   AND publication.session_id = invalidated.id
@@ -566,22 +608,71 @@ invalidated_sessions AS MATERIALIZED (
   RETURNING session.id
 ),
 deleted_acp_states AS (
-  DELETE FROM acp_session_states state
+  DELETE FROM agent_session_states state
   USING invalidated_sessions invalidated
   WHERE state.team_id = public.memoh_current_team_id()
     AND state.session_id = invalidated.id
   RETURNING state.session_id
 ),
 deleted_acp_lines AS (
-  DELETE FROM acp_session_state_lines line
+  DELETE FROM agent_session_state_lines line
   USING invalidated_sessions invalidated
   WHERE line.team_id = public.memoh_current_team_id()
     AND line.session_id = invalidated.id
   RETURNING line.session_id
 )
-DELETE FROM acp_session_publications publication
+DELETE FROM agent_session_publications publication
 USING invalidated_sessions invalidated
 WHERE publication.team_id = public.memoh_current_team_id()
   AND publication.session_id = invalidated.id
   AND (SELECT count(*) FROM deleted_acp_states) >= 0
   AND (SELECT count(*) FROM deleted_acp_lines) >= 0;
+
+-- name: UpdateSessionModelPreference :exec
+-- Preference write-back (issue #879). Deliberately does NOT touch
+-- updated_at: sidebar recency must not move on picker changes or
+-- per-turn write-backs. The explicit team predicate matches every other
+-- query in this file (defense-in-depth under FORCE RLS), and the deleted_at
+-- guard keeps late writes out of soft-deleted sessions.
+UPDATE bot_sessions
+SET preferred_chat_model_id = $2,
+    preferred_reasoning_effort = $3,
+    preferred_external_model_id = $4,
+    model_preference_revision = gen_random_uuid()
+WHERE team_id = public.memoh_current_team_id()
+  AND id = $1
+  AND deleted_at IS NULL;
+
+-- name: GetLatestSessionModelPreference :one
+-- Welcome composer seed: the bot's most recent native user-facing session
+-- that has a persisted pair, created by the CURRENT user (multi-member bots
+-- must not seed one member's welcome from another member's pick). Native =
+-- model runtime, chat/discuss mode, user visibility; subagent/schedule/ACP
+-- sessions never seed.
+SELECT preferred_chat_model_id, preferred_reasoning_effort
+FROM bot_sessions
+WHERE team_id = public.memoh_current_team_id()
+  AND bot_id = $1
+  AND created_by_user_id = $2
+  AND runtime_type = 'model'
+  AND session_mode IN ('chat', 'discuss')
+  AND type = 'chat'
+  AND visibility = 'user'
+  AND deleted_at IS NULL
+  AND preferred_chat_model_id IS NOT NULL
+ORDER BY updated_at DESC, id DESC
+LIMIT 1;
+
+-- name: CompareAndSetSessionModelPreference :execrows
+-- A picker may not overwrite a send or a newer picker operation. Nullable
+-- revisions allow existing sessions to upgrade without a table backfill.
+UPDATE bot_sessions
+SET preferred_chat_model_id = sqlc.narg(preferred_chat_model_id)::uuid,
+    preferred_external_model_id = sqlc.narg(preferred_external_model_id)::text,
+    preferred_reasoning_effort = sqlc.narg(preferred_reasoning_effort)::text,
+    model_preference_revision = gen_random_uuid()
+WHERE team_id = public.memoh_current_team_id()
+  AND id = sqlc.arg(id)
+  AND runtime_type = sqlc.arg(runtime_type)
+  AND model_preference_revision IS NOT DISTINCT FROM sqlc.narg(expected_revision)::uuid
+  AND deleted_at IS NULL;

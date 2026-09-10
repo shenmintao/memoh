@@ -1,3 +1,5 @@
+DROP TABLE IF EXISTS public.workspace_dependency_catalogs;
+DROP TABLE IF EXISTS public.workspace_dependency_definitions;
 ALTER TABLE IF EXISTS bot_channel_routes DROP CONSTRAINT IF EXISTS fk_bot_channel_routes_active_session;
 ALTER TABLE IF EXISTS bot_history_messages DROP CONSTRAINT IF EXISTS fk_compact_id;
 
@@ -38,9 +40,9 @@ DROP VIEW IF EXISTS bot_visible_history_messages CASCADE;
 DROP TABLE IF EXISTS bot_history_messages CASCADE;
 DROP TABLE IF EXISTS bot_session_events CASCADE;
 DROP TABLE IF EXISTS bot_session_discuss_cursors CASCADE;
-DROP TABLE IF EXISTS acp_session_state_lines CASCADE;
-DROP TABLE IF EXISTS acp_session_publications CASCADE;
-DROP TABLE IF EXISTS acp_session_states CASCADE;
+DROP TABLE IF EXISTS agent_session_state_lines CASCADE;
+DROP TABLE IF EXISTS agent_session_publications CASCADE;
+DROP TABLE IF EXISTS agent_session_states CASCADE;
 DROP TABLE IF EXISTS session_runs CASCADE;
 DROP TABLE IF EXISTS bot_sessions CASCADE;
 DROP SEQUENCE IF EXISTS session_runtime_fencing_token_seq;
@@ -60,6 +62,7 @@ DROP TABLE IF EXISTS subagents CASCADE;
 DROP TABLE IF EXISTS bot_preauth_keys CASCADE;
 DROP TABLE IF EXISTS bot_members CASCADE;
 DROP TABLE IF EXISTS bot_remote_runtime_bindings CASCADE;
+DROP TABLE IF EXISTS bot_dependency_installations CASCADE;
 DROP TABLE IF EXISTS bot_skill_package_installations CASCADE;
 DROP TABLE IF EXISTS user_runtimes CASCADE;
 DROP TABLE IF EXISTS connectors CASCADE;

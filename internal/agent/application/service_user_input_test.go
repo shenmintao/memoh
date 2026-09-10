@@ -17,6 +17,7 @@ import (
 	"github.com/felinics/memoh/internal/agent/turn"
 	"github.com/felinics/memoh/internal/bots"
 	session "github.com/felinics/memoh/internal/chat/thread"
+	sessiontest "github.com/felinics/memoh/internal/testutil/sessionruntime"
 )
 
 const testACPUserInputOwnerID = "owner-user"
@@ -75,9 +76,7 @@ func (f *fakeUserInputService) CanRespond(req userinput.Request) bool {
 	if f.canRespondSet {
 		return f.canRespond
 	}
-	if userinput.IsProcessLocalACPRequest(req) {
-		return false
-	}
+	// Default mirrors a live waiter: a pending row can accept a response.
 	return req.Status == userinput.StatusPending
 }
 
@@ -365,7 +364,7 @@ func TestRuntimeUserInputCommandCommitsAndResumesSameRun(t *testing.T) {
 			return sendAgentStreamEvent(ctx, eventCh, native.StreamEvent{Type: native.EventAgentEnd})
 		},
 	}
-	manager := sessionruntime.NewManager(sessionruntime.NewMemoryBackend(), sessionruntime.Options{
+	manager := sessiontest.New(sessionruntime.NewMemoryBackend(), sessionruntime.Options{
 		OwnerID:       "owner-1",
 		StateTTL:      time.Minute,
 		OwnerLeaseTTL: time.Second,
@@ -376,8 +375,7 @@ func TestRuntimeUserInputCommandCommitsAndResumesSameRun(t *testing.T) {
 		t.Fatalf("start runtime manager: %v", err)
 	}
 	resolver.SetSessionRuntime(manager)
-	if err := manager.StartRun(
-		context.Background(),
+	if _, err := sessiontest.Start(context.Background(), manager,
 		botID,
 		sessionID,
 		runID,
@@ -417,17 +415,13 @@ func TestRuntimeUserInputCommandCommitsAndResumesSameRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encode response: %v", err)
 	}
-	handled, err := manager.DispatchRunCommand(
-		context.Background(),
-		botID,
-		sessionID,
-		runID,
-		sessionruntime.CommandUserInputResponse,
-		inputID,
-		payload,
-	)
-	if err != nil || !handled {
-		t.Fatalf("dispatch response = handled:%v err:%v", handled, err)
+	err = resolver.handleRuntimeDecisionCommand(context.Background(), sessionruntime.Command{
+		ID: "control-early-ack", Type: sessionruntime.CommandUserInputResponse,
+		BotID: botID, SessionID: sessionID, RunID: runID,
+		Generation: handle.Generation, TargetID: inputID, Payload: payload,
+	})
+	if err != nil {
+		t.Fatalf("handle decision command: %v", err)
 	}
 	if fake.submitCalls != 1 {
 		t.Fatalf("submit calls = %d, want 1 before acknowledgement", fake.submitCalls)
@@ -695,11 +689,11 @@ func TestRespondUserInputACPRequestReattachesActivePrompt(t *testing.T) {
 		},
 	}
 	attachACPUserInputAuth(resolver)
-	hub := resolver.registerACPActivePrompt("bot-1", "session-1")
+	hub := resolver.registerExternalAgentActivePrompt("bot-1", "session-1")
 	if hub == nil {
 		t.Fatal("expected active ACP prompt hub")
 	}
-	defer resolver.unregisterACPActivePrompt("bot-1", "session-1", hub)
+	defer resolver.unregisterExternalAgentActivePrompt("bot-1", "session-1", hub)
 
 	eventCh := make(chan WSStreamEvent, 8)
 	done := make(chan error, 1)
@@ -781,11 +775,11 @@ func TestRespondUserInputACPRequestCanSuppressActivePromptReattach(t *testing.T)
 		},
 	}
 	attachACPUserInputAuth(resolver)
-	hub := resolver.registerACPActivePrompt("bot-1", "session-1")
+	hub := resolver.registerExternalAgentActivePrompt("bot-1", "session-1")
 	if hub == nil {
 		t.Fatal("expected active ACP prompt hub")
 	}
-	defer resolver.unregisterACPActivePrompt("bot-1", "session-1", hub)
+	defer resolver.unregisterExternalAgentActivePrompt("bot-1", "session-1", hub)
 
 	eventCh := make(chan WSStreamEvent, 4)
 	err := resolver.respondUserInput(context.Background(), UserInputResponseInput{
@@ -818,6 +812,9 @@ func TestRespondUserInputACPRequestWithoutWaiterCancelsInsteadOfSubmitting(t *te
 			ProviderMetadata: map[string]any{"source": userinput.ProviderSourceACPMCP},
 		},
 		resolved: resolved,
+		// The blocked waiter is gone (process restart, prompt settled).
+		canRespondSet: true,
+		canRespond:    false,
 	}
 	resolver := &Service{
 		userInput: fake,

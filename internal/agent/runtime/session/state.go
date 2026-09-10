@@ -60,7 +60,19 @@ func pendingDecisionEvent(event native.StreamEvent) bool {
 	return status == "" || strings.EqualFold(status, "pending")
 }
 
-func runtimeRunPatch(snapshot Snapshot, status, runError, steer, lease bool) RuntimeDelta {
+// decisionEventID identifies the decision an approval or user-input event
+// belongs to, pairing its pending event with the later terminal status.
+func decisionEventID(event native.StreamEvent) string {
+	if id := strings.TrimSpace(event.ApprovalID); id != "" {
+		return id
+	}
+	if id := strings.TrimSpace(event.UserInputID); id != "" {
+		return id
+	}
+	return strings.TrimSpace(event.ToolCallID)
+}
+
+func runtimeRunPatch(snapshot Snapshot, status, runError, lease bool) RuntimeDelta {
 	run := snapshot.CurrentRunView
 	if run == nil {
 		return RuntimeDelta{}
@@ -79,13 +91,6 @@ func runtimeRunPatch(snapshot Snapshot, status, runError, steer, lease bool) Run
 		patch.ErrorCode = &code
 		value := run.Error
 		patch.Error = &value
-	}
-	if steer && run.Steer != nil {
-		value := *run.Steer
-		patch.Steer = &value
-	}
-	if steer {
-		patch.SteerQueue = append([]SteerState(nil), run.SteerQueue...)
 	}
 	if lease {
 		value := time.Time{}
@@ -106,17 +111,26 @@ func (*Manager) leaseExpired(run *CurrentRunView, now time.Time) bool {
 	return true
 }
 
+// IsActiveRunStatus reports whether a projected run status still occupies the
+// session: accepted, running, or waiting for a decision.
+func IsActiveRunStatus(status string) bool { return isActiveRunStatus(status) }
+
 func isActiveRunStatus(status string) bool {
 	return strings.EqualFold(status, RunStatusAdmitting) ||
 		strings.EqualFold(status, RunStatusRunning) ||
 		strings.EqualFold(status, RunStatusWaitingDecision) ||
-		strings.EqualFold(status, RunStatusAborting)
+		strings.EqualFold(status, RunStatusAborting) ||
+		strings.EqualFold(status, RunStatusFinishing)
 }
 
 func isEventAcceptingRunStatus(status string) bool {
 	return strings.EqualFold(status, RunStatusRunning) ||
 		strings.EqualFold(status, RunStatusWaitingDecision) ||
 		strings.EqualFold(status, RunStatusAborting)
+}
+
+func isAbortableRunStatus(status string) bool {
+	return strings.EqualFold(status, RunStatusAdmitting) || isEventAcceptingRunStatus(status)
 }
 
 func (m *Manager) markLostIfExpired(snapshot *Snapshot, now time.Time) bool {
@@ -221,7 +235,10 @@ func normalizeRunAdmission(admission RunAdmissionView) (RunAdmissionView, error)
 	if err != nil {
 		return RunAdmissionView{}, err
 	}
-	return RunAdmissionView{RequestUserTurn: requestUserTurn, Operation: operation}, nil
+	return RunAdmissionView{
+		RequestUserTurn: requestUserTurn,
+		Operation:       operation,
+	}, nil
 }
 
 func normalizeRequestUserTurn(turn *chatview.UITurn) (*chatview.UITurn, error) {
@@ -296,4 +313,19 @@ func upsertUIMessage(messages []chatview.UIMessage, incoming chatview.UIMessage)
 		}
 	}
 	return append(messages, incoming)
+}
+
+func legacyRuntimeRunPatch(snapshot Snapshot, status, runError, steer, lease bool) RuntimeDelta {
+	delta := runtimeRunPatch(snapshot, status, runError, lease)
+	if steer && snapshot.CurrentRunView != nil {
+		if delta.Run == nil {
+			return delta
+		}
+		if snapshot.CurrentRunView.Steer != nil {
+			value := *snapshot.CurrentRunView.Steer
+			delta.Run.Steer = &value
+		}
+		delta.Run.SteerQueue = append([]SteerState(nil), snapshot.CurrentRunView.SteerQueue...)
+	}
+	return delta
 }

@@ -56,6 +56,11 @@ func (s *Service) StartTurn(ctx context.Context, cmd turn.StartTurnCommand) (tur
 	}
 
 	injectCh := make(chan turn.InjectMessage, 16)
+	// A busy thread is reported as ErrSessionBusy. Whether to park the command
+	// in the follow-up queue is the ingress's decision (EnqueueDeferredTurn):
+	// only a caller whose user sees the run through the session runtime
+	// subscription can drop its handle, because a run started from the queue
+	// has no other consumer for its output.
 	admission, err := s.admitTurnRun(runCtx, cmd, cancel, cancelCause, injectCh)
 	if err != nil {
 		cancel()
@@ -70,9 +75,11 @@ func (s *Service) StartTurn(ctx context.Context, cmd turn.StartTurnCommand) (tur
 
 	req := chatRequestFromCommand(cmd)
 	req.RunID = admission.RunID
+	req.RunHandle = admission.Handle
 	req.TurnID = admission.TurnID
 	req.TurnPosition = &admission.TurnPosition
 	req.InjectCh = injectCh
+	req.QueueSteerEnabled = injectCh != nil
 	req.OutboundAssetCollector = func() []turn.OutboundAssetRef {
 		assetMu.Lock()
 		defer assetMu.Unlock()
@@ -272,7 +279,7 @@ func (h *runHandle) publishChunk(chunk StreamChunk) error {
 // RespondToolApproval resumes a turn deferred on tool approval.
 func (s *Service) RespondToolApproval(ctx context.Context, input turn.ToolApprovalResponse, eventCh chan<- json.RawMessage) error {
 	converted := toolApprovalInputFromResponse(input)
-	if handled, err := s.routeToolApprovalResponse(ctx, converted); handled || err != nil {
+	if handled, err := s.routeToolApprovalResponse(ctx, converted, eventCh); handled || err != nil {
 		return err
 	}
 	return s.respondToolApproval(ctx, converted, eventCh)
@@ -281,7 +288,7 @@ func (s *Service) RespondToolApproval(ctx context.Context, input turn.ToolApprov
 // RespondUserInput resumes a turn deferred on ask_user.
 func (s *Service) RespondUserInput(ctx context.Context, input turn.UserInputResponse, eventCh chan<- json.RawMessage) error {
 	converted := userInputInputFromResponse(input)
-	if handled, err := s.routeUserInputResponse(ctx, converted); handled || err != nil {
+	if handled, err := s.routeUserInputResponse(ctx, converted, eventCh); handled || err != nil {
 		return err
 	}
 	return s.respondUserInput(ctx, converted, eventCh)
@@ -395,4 +402,26 @@ func parseKind(p json.RawMessage) string {
 		return ""
 	}
 	return env.Type
+}
+
+// StopTurn routes cancellation to the durable owner even after the channel
+// stream has closed, using the same application entry point as the web Stop.
+func (s *Service) StopTurn(ctx context.Context, cmd turn.StopCommand) (bool, error) {
+	if cmd.TeamID == "" || (s.allowedTeam != "" && cmd.TeamID != s.allowedTeam) {
+		return false, turn.ErrTeamNotServed
+	}
+	if cmd.BotID == "" || cmd.ThreadID == "" {
+		return false, errors.New("bot and thread are required")
+	}
+	if s.decisionRuntime == nil {
+		return false, nil
+	}
+	snapshot, err := s.decisionRuntime.Snapshot(ctx, cmd.BotID, cmd.ThreadID)
+	if err != nil {
+		return false, err
+	}
+	if snapshot.CurrentRunView == nil {
+		return false, nil
+	}
+	return s.AbortRuntimeRun(ctx, cmd.BotID, cmd.ThreadID, snapshot.CurrentRunView.RunID, "")
 }

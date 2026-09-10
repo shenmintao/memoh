@@ -82,9 +82,15 @@ type MemoryBackend struct {
 	nextCleanup       time.Time
 	snapshots         map[string]Snapshot
 	snapshotExpiresAt map[string]time.Time
-	historyResets     map[string]ResetLease
-	subscribers       *subscriberSet[Event]
-	closed            bool
+	// decisionOutputs share the snapshot TTL but never the snapshot map: they
+	// are per-command event logs, not session state.
+	decisionOutputs         map[string]*memoryDecisionOutput
+	decisionOutputExpiresAt map[string]time.Time
+	historyResets           map[string]ResetLease
+	steerQueues             map[string]steerQueueState
+	followUpQueues          map[string]followUpQueueState
+	subscribers             *subscriberSet[Event]
+	closed                  bool
 	// generation is this process's liveness incarnation. It is minted once and
 	// never changes, so it dies with the heap that holds the live state.
 	generation string
@@ -99,12 +105,16 @@ func NewMemoryBackendWithTTL(stateTTL time.Duration) *MemoryBackend {
 		stateTTL = 24 * time.Hour
 	}
 	return &MemoryBackend{
-		stateTTL:          stateTTL,
-		snapshots:         make(map[string]Snapshot),
-		snapshotExpiresAt: make(map[string]time.Time),
-		historyResets:     make(map[string]ResetLease),
-		subscribers:       newSubscriberSet[Event](),
-		generation:        uuid.NewString(),
+		stateTTL:                stateTTL,
+		snapshots:               make(map[string]Snapshot),
+		snapshotExpiresAt:       make(map[string]time.Time),
+		decisionOutputs:         make(map[string]*memoryDecisionOutput),
+		decisionOutputExpiresAt: make(map[string]time.Time),
+		historyResets:           make(map[string]ResetLease),
+		steerQueues:             make(map[string]steerQueueState),
+		followUpQueues:          make(map[string]followUpQueueState),
+		subscribers:             newSubscriberSet[Event](),
+		generation:              uuid.NewString(),
 	}
 }
 
@@ -412,8 +422,12 @@ func cloneSnapshot(snapshot Snapshot) (Snapshot, error) {
 		currentRun.Messages = nil
 		snapshot.CurrentRunView = &currentRun
 	}
+	data, err := marshalSnapshot(snapshot)
+	if err != nil {
+		return Snapshot{}, err
+	}
 	var out Snapshot
-	if err := cloneJSON(snapshot, &out); err != nil {
+	if err := unmarshalSnapshot(data, &out); err != nil {
 		return Snapshot{}, err
 	}
 	if out.CurrentRunView != nil {
@@ -492,6 +506,14 @@ func (b *MemoryBackend) purgeExpiredLocked(now time.Time) {
 		return
 	}
 	nextCleanup := time.Time{}
+	for key, expiresAt := range b.decisionOutputExpiresAt {
+		if !now.Before(expiresAt) {
+			delete(b.decisionOutputs, key)
+			delete(b.decisionOutputExpiresAt, key)
+		} else if nextCleanup.IsZero() || expiresAt.Before(nextCleanup) {
+			nextCleanup = expiresAt
+		}
+	}
 	for key, expiresAt := range b.snapshotExpiresAt {
 		if !now.Before(expiresAt) {
 			if snapshot, ok := b.snapshots[key]; ok && snapshot.CurrentRunView != nil && isActiveRunStatus(snapshot.CurrentRunView.Status) {

@@ -31,17 +31,24 @@ import (
 
 // MessageHandler handles bot-scoped messaging endpoints.
 type MessageHandler struct {
-	messageService messagepkg.Service
-	sessionService *session.Service
-	runtimeResets  messageRuntimeResetService
-	messageEvents  messageevent.Subscriber
-	mediaService   *media.Service
-	botService     *bots.Service
-	accountService *accounts.Service
-	toolApproval   *toolapproval.Service
-	userInput      *userinput.Service
-	bgManager      *background.Manager
-	logger         *slog.Logger
+	messageService     messagepkg.Service
+	sessionService     *session.Service
+	runtimeResets      messageRuntimeResetService
+	messageEvents      messageevent.Subscriber
+	mediaService       *media.Service
+	botService         *bots.Service
+	accountService     *accounts.Service
+	toolApproval       *toolapproval.Service
+	userInput          *userinput.Service
+	bgManager          *background.Manager
+	projectionCache    messageProjectionCache
+	compactionActivity interface{ ActiveSessions(string) []string }
+	logger             *slog.Logger
+}
+
+type messageProjectionCache interface {
+	DropSession(sessionID string)
+	DropAll()
 }
 
 // runtimeResetService is intentionally a narrow handler-owned port. Clearing the
@@ -84,6 +91,14 @@ func NewMessageHandler(log *slog.Logger, messageService messagepkg.Service, sess
 // SetMediaService sets the optional media service for asset serving.
 func (h *MessageHandler) SetMediaService(svc *media.Service) {
 	h.mediaService = svc
+}
+
+func (h *MessageHandler) SetProjectionCache(cache messageProjectionCache) {
+	h.projectionCache = cache
+}
+
+func (h *MessageHandler) SetCompactionActivity(activity interface{ ActiveSessions(string) []string }) {
+	h.compactionActivity = activity
 }
 
 func (h *MessageHandler) SetToolApprovalService(svc *toolapproval.Service) {
@@ -384,10 +399,18 @@ func (h *MessageHandler) toolApprovalCanApproveFn(sess session.Thread) func(tool
 	defaultFn := func(req toolapproval.Request) bool {
 		return toolapproval.CanApprove(req.Status)
 	}
-	if h == nil || h.toolApproval == nil || !session.IsACPRuntime(sess) {
+	if h == nil || h.toolApproval == nil || !session.UsesDecisionWaiter(sess) {
 		return defaultFn
 	}
 	return h.toolApproval.CanRespond
+}
+
+func (h *MessageHandler) userInputCanRespondFn(sess session.Thread) func(userinput.Request) bool {
+	// nil keeps mergeUserInputs' native default: a pending row can respond.
+	if h == nil || h.userInput == nil || !session.UsesDecisionWaiter(sess) {
+		return nil
+	}
+	return h.userInput.CanRespond
 }
 
 func (h *MessageHandler) decorateUITurns(ctx context.Context, botID, sessionID string, sess session.Thread, items []chatview.UITurn) {
@@ -427,7 +450,7 @@ func (h *MessageHandler) decorateUITurns(ctx context.Context, botID, sessionID s
 		mergeToolApprovals(items, approvals, h.toolApprovalCanApproveFn(sess))
 	}
 	if len(requests) > 0 {
-		mergeUserInputs(items, requests, h.userInput.CanRespond)
+		mergeUserInputs(items, requests, h.userInputCanRespondFn(sess))
 	}
 }
 
@@ -698,6 +721,9 @@ func (h *MessageHandler) DeleteMessages(c echo.Context) error {
 		if err := h.messageService.DeleteBySession(ctx, sessionID); err != nil {
 			return apperror.Wrap(apperror.CodeSessionHistoryInconsistent, err, nil)
 		}
+		if h.projectionCache != nil {
+			h.projectionCache.DropSession(sessionID)
+		}
 	} else {
 		ctx, release, resetErr := h.runtimeResets.BeginBotHistoryReset(ctx, botID)
 		if resetErr != nil {
@@ -706,6 +732,9 @@ func (h *MessageHandler) DeleteMessages(c echo.Context) error {
 		defer release()
 		if err := h.messageService.DeleteByBot(ctx, botID); err != nil {
 			return apperror.Wrap(apperror.CodeSessionHistoryInconsistent, err, nil)
+		}
+		if h.projectionCache != nil {
+			h.projectionCache.DropAll()
 		}
 	}
 	return c.NoContent(http.StatusNoContent)

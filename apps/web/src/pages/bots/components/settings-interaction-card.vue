@@ -99,7 +99,7 @@ import ModelSelect from './model-select.vue'
 import { reconcileStoredEffort } from './reasoning-effort'
 import type { AcpprofilePublicProfile, BotagentsBotAgent, SettingsSettings, ModelsGetResponse, ProvidersGetResponse } from '@memohai/sdk'
 import { ACP_DEFAULT_PROJECT_MODE, ACP_DEFAULT_PROJECT_PATH, findMissingRequiredManagedField, isACPAgentEnabled, normalizeACPAgentID, readACPAgentConfig } from '@/utils/acp'
-import { botAgentIcon, botAgentName, botAgentProvider } from '@/utils/bot-agent'
+import { BOT_AGENT_RUNTIME_CLAUDE_CODE, BOT_AGENT_RUNTIME_CODEX, botAgentIcon, botAgentName, botAgentProvider, isDirectBotAgentConfigured, normalizeBotAgentRuntime } from '@/utils/bot-agent'
 
 type InteractionSettingsForm = SettingsSettings & {
   chat_runtime: string
@@ -124,6 +124,8 @@ const MEMOH_AGENT_VALUE = 'memoh'
 const BOT_AGENT_VALUE_PREFIX = 'agent:'
 
 function isAgentConfigured(agent: BotagentsBotAgent): boolean {
+  const directConfigured = isDirectBotAgentConfigured(agent)
+  if (directConfigured !== null) return directConfigured
   const provider = botAgentProvider(agent)
   const profile = props.acpProfiles.find(item => normalizeACPAgentID(item.id) === provider)
   if (!profile || !isACPAgentEnabled(props.botMetadata, provider)) return false
@@ -192,8 +194,15 @@ function setDefaultAgent(value: string) {
   if (!agent) return
 
   setDefaultBotAgent(agent)
+  const runtime = normalizeBotAgentRuntime(agent.runtime)
+  const direct = runtime === BOT_AGENT_RUNTIME_CODEX || runtime === BOT_AGENT_RUNTIME_CLAUDE_CODE
   // eslint-disable-next-line vue/no-mutating-props
-  props.form.chat_runtime = 'acp_agent'
+  props.form.chat_runtime = direct ? runtime : 'acp_agent'
+  if (direct) {
+    // A direct default is fully described by its runtime.
+    // eslint-disable-next-line vue/no-mutating-props
+    props.form.chat_acp_agent_id = ''
+  }
 }
 
 const chatModelReasoning = computed(() => {

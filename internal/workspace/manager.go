@@ -40,6 +40,13 @@ const (
 	DisplayRFBSocketName        = "display.rfb.sock"
 	ACPToolsProxyHTTPURL        = bridge.ACPToolsProxyHTTPURL
 
+	// WorkspaceInitPath and WorkspaceBridgePath are the container start
+	// parameters used by buildWorkspaceContainerSpec: the image's init and the
+	// mount point of the Server-supplied bridge binary. A container missing
+	// either never starts, so WaitForWorkspaceReady surfaces that on its own.
+	WorkspaceInitPath   = "/usr/bin/tini"
+	WorkspaceBridgePath = "/opt/memoh/bridge"
+
 	legacyGRPCPort           = 9090
 	bridgeReadyTimeout       = 45 * time.Second
 	bridgeReadyRPCTimeout    = 3 * time.Second
@@ -104,6 +111,8 @@ type Manager struct {
 	setupDiagnostics  WorkspaceSetupDiagnostics
 	legacyMu          sync.RWMutex
 	legacyIPs         map[string]string // botID → IP for pre-bridge containers
+	bridgeResetMu     sync.Mutex
+	bridgeResetFns    []func(botID string) // see OnBridgeReset
 }
 
 func NewManager(log *slog.Logger, service runtimeService, networkController netctl.Controller, cfg config.WorkspaceConfig, namespace string, conn *pgxpool.Pool, queryOverride ...dbstore.Queries) *Manager {
@@ -242,7 +251,7 @@ func (m *Manager) ClearLegacyIP(botID string) {
 // gRPC dials use the bridge container's Unix socket.
 func (m *Manager) clearLegacyRoute(botID string) {
 	m.ClearLegacyIP(botID)
-	m.grpcPool.Remove(botID)
+	m.resetBridge(botID)
 }
 
 func (m *Manager) nativeMCPClient(ctx context.Context, botID string) (*bridge.Client, error) {
@@ -362,7 +371,7 @@ func (m *Manager) WaitForWorkspaceReady(ctx context.Context, botID string) error
 			return nil
 		}
 		lastErr = err
-		m.grpcPool.Remove(botID)
+		m.resetBridge(botID)
 		if time.Now().After(deadline) {
 			return fmt.Errorf("workspace bridge not ready for bot %s after %s: %w", botID, bridgeReadyTimeout, lastErr)
 		}
@@ -381,9 +390,6 @@ func (m *Manager) InitializeNativeWorkspace(ctx context.Context, botID string) e
 	client, err := m.nativeMCPClient(ctx, botID)
 	if err != nil {
 		return fmt.Errorf("%w: resolve native workspace filesystem: %w", ErrWorkspaceTemplateBootstrapFailed, err)
-	}
-	if err := validateWorkspaceContract(ctx, client); err != nil {
-		return err
 	}
 	if m.templateBootstrap == nil {
 		return fmt.Errorf("%w: template bootstrapper is not configured", ErrWorkspaceTemplateBootstrapFailed)

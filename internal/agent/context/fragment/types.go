@@ -27,7 +27,7 @@ const (
 	KindHookContext          Kind = "hook_context"
 	KindInjectedMessage      Kind = "injected_message"
 	KindBackgroundSummary    Kind = "background_summary"
-	KindACPContext           Kind = "acp_context"
+	KindRuntimeContext       Kind = "runtime_context"
 
 	// Reserved for the memory/compaction rewrites. Phase 1 keeps their existing
 	// resolver paths intact while making room for future collectors.
@@ -369,6 +369,7 @@ type ManifestView string
 
 const (
 	ViewRunConfigPreProvider ManifestView = "run_config_pre_provider"
+	ViewExternalAgentPrompt  ManifestView = "external_agent_prompt"
 )
 
 // DynamicMutator names a later runtime transform that can change provider params
@@ -441,7 +442,11 @@ type ContextBudgetPlan struct {
 type SelectionTrace struct {
 	Selected    int            `json:"selected"`
 	Dropped     int            `json:"dropped"`
+	Trimmed     int            `json:"trimmed,omitempty"`
 	DropReasons map[string]int `json:"drop_reasons,omitempty"`
+	// DropReasonTokens is the token estimate lost per drop reason, rolled up
+	// when the snapshot is built so readers never need the per-fragment audit.
+	DropReasonTokens map[string]int `json:"drop_reason_tokens,omitempty"`
 }
 
 type SelectionDecisionKind string

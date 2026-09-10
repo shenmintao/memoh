@@ -3,10 +3,8 @@ import type { AcpprofilePublicProfile } from '@memohai/sdk'
 import {
   acpManagedFieldHelp,
   acpManagedFieldLabel,
-  acpSetupModeLabel,
   acpSetupModes,
   filterCreateVisibleManagedFields,
-  filterSettingsVisibleManagedFields,
 } from './setup-fields'
 
 const t = (key: string) => key
@@ -31,12 +29,6 @@ describe('acpSetupModes', () => {
   })
 })
 
-describe('acpSetupModeLabel', () => {
-  it('labels codex oauth mode', () => {
-    expect(acpSetupModeLabel(profile(), 'oauth', t)).toBe('bots.settings.acpSetupChatGPT')
-  })
-})
-
 describe('generic ACP managed fields', () => {
   const generic = profile({
     id: 'acp',
@@ -48,11 +40,22 @@ describe('generic ACP managed fields', () => {
     ],
   })
 
-  it('uses localized labels and help text', () => {
+  it('uses localized labels', () => {
     const command = generic.managed_fields?.[0] ?? {}
-    const argumentsField = generic.managed_fields?.[1] ?? {}
     expect(acpManagedFieldLabel(generic, command, t)).toBe('bots.settings.acpCommand')
-    expect(acpManagedFieldHelp(generic, argumentsField, t)).toBe('bots.settings.acpArgumentsHelp')
+  })
+
+  it('leaves command and arguments unexplained', () => {
+    // The label plus the placeholder already carry it; help under these two was
+    // a sentence restating the field name.
+    const command = { ...(generic.managed_fields?.[0] ?? {}), help: 'from the profile' }
+    const argumentsField = { ...(generic.managed_fields?.[1] ?? {}), help: 'from the profile' }
+    expect(acpManagedFieldHelp(generic, command)).toBe('')
+    expect(acpManagedFieldHelp(generic, argumentsField)).toBe('')
+  })
+
+  it('keeps profile-authored help on every other field', () => {
+    expect(acpManagedFieldHelp(generic, { id: 'api_key', help: 'Paste your key' })).toBe('Paste your key')
   })
 })
 
@@ -64,17 +67,5 @@ describe('filterCreateVisibleManagedFields', () => {
   it('drops provider_id and oauth_token in api_key mode', () => {
     const fields = filterCreateVisibleManagedFields(profile(), {}, 'api_key')
     expect(fields.map(f => f.id)).toEqual(['api_key'])
-  })
-})
-
-describe('filterSettingsVisibleManagedFields', () => {
-  it('hides managed fields for codex oauth mode', () => {
-    expect(filterSettingsVisibleManagedFields(profile(), {}, 'oauth')).toEqual([])
-  })
-
-  it('shows api_key field for claude in api_key mode only', () => {
-    const claude = profile({ id: 'claude-code' })
-    expect(filterSettingsVisibleManagedFields(claude, {}, 'api_key').map(f => f.id)).toEqual(['api_key'])
-    expect(filterSettingsVisibleManagedFields(claude, {}, 'oauth').map(f => f.id)).toEqual([])
   })
 })

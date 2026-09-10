@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/felinics/memoh/internal/agent/application"
+	contextfrag "github.com/felinics/memoh/internal/agent/context/fragment"
 	"github.com/felinics/memoh/internal/agent/runtime/native"
 	sessionruntime "github.com/felinics/memoh/internal/agent/runtime/session"
 	"github.com/felinics/memoh/internal/agent/turn"
@@ -57,23 +58,22 @@ type wsLifecycleQueries struct {
 func (q *wsLifecycleQueries) CreateContextLifecycle(
 	_ context.Context,
 	arg sqlc.CreateContextLifecycleParams,
-) (sqlc.ContextLifecycle, error) {
+) (sqlc.CreateContextLifecycleRow, error) {
 	q.params = append(q.params, arg)
-	return sqlc.ContextLifecycle{
+	return sqlc.CreateContextLifecycleRow{
 		RunID:     arg.RunID,
 		BotID:     arg.BotID,
 		SessionID: arg.SessionID,
 		Status:    arg.Status,
 		ErrorCode: arg.ErrorCode,
-		Snapshot:  arg.Snapshot,
 	}, nil
 }
 
 func (*wsLifecycleQueries) GetContextLifecycleByRunID(
 	context.Context,
 	pgtype.UUID,
-) (sqlc.ContextLifecycle, error) {
-	return sqlc.ContextLifecycle{}, pgx.ErrNoRows
+) (sqlc.GetContextLifecycleByRunIDRow, error) {
+	return sqlc.GetContextLifecycleByRunIDRow{}, pgx.ErrNoRows
 }
 
 func newStubWSTurnAdmitter() *stubWSTurnAdmitter {
@@ -618,7 +618,7 @@ func TestFinishWSRunPersistsPreContextFailureAfterFencedFinish(t *testing.T) {
 	if err := json.Unmarshal(row.Snapshot, &snapshot); err != nil {
 		t.Fatalf("decode lifecycle snapshot: %v", err)
 	}
-	if snapshot.Version != 1 {
+	if snapshot.Version != contextfrag.LifecycleSnapshotVersion {
 		t.Fatalf("snapshot version = %d, want 1", snapshot.Version)
 	}
 }
@@ -675,6 +675,40 @@ func TestStartWSStreamPublishesAdmittedTurnAndReleasesTheSession(t *testing.T) {
 type disconnectedWSRuntime struct {
 	*stubWSTurnAdmitter
 	published chan native.StreamEvent
+}
+
+type finishingSteerWSRuntime struct {
+	*stubWSTurnAdmitter
+	accepted bool
+}
+
+func (r *finishingSteerWSRuntime) FinishRun(ctx context.Context, handle sessionruntime.RunHandle, status, message string) error {
+	// A legacy control already in flight may send until FinishRun stops it.
+	func() {
+		defer func() { _ = recover() }()
+		r.submissions()[0].Execution.InjectCh <- turn.InjectMessage{Text: "finishing instruction"}
+		r.accepted = true
+	}()
+	return r.stubWSTurnAdmitter.FinishRun(ctx, handle, status, message)
+}
+
+func TestWSStreamKeepsSteeringChannelOpenUntilFinalization(t *testing.T) {
+	t.Parallel()
+	runtime := &finishingSteerWSRuntime{stubWSTurnAdmitter: newStubWSTurnAdmitter()}
+	runtime.admission = startedWSAdmission()
+	handler := &LocalChannelHandler{logger: slog.Default(), sessionRuntime: runtime}
+	writer := &wsWriter{ch: make(chan []byte, 16), stop: make(chan struct{}), done: make(chan struct{})}
+	_, started := handler.startWSStream(t.Context(), t.Context(), writer, wsAdmissionBotID, wsAdmissionTestRef(), "finishing-steer", wsAdmissionTestSubmission(), nil, nil,
+		func(context.Context, wsTurnRef, wsAdmittedTurn, chan<- application.WSStreamEvent, <-chan struct{}) error {
+			return nil
+		})
+	if !started {
+		t.Fatal("run was not admitted")
+	}
+	runtime.awaitTerminalWrite(t)
+	if !runtime.accepted {
+		t.Fatal("runner closed the channel while a legacy control could still send")
+	}
 }
 
 func (r *disconnectedWSRuntime) HandleAgentEvent(ctx context.Context, _ sessionruntime.RunHandle, event native.StreamEvent) ([]chatview.UIMessage, error) {

@@ -102,19 +102,36 @@ export interface ToolDisplay {
   actionKey: string
   actionParams?: Record<string, unknown>
   target: string
+  // Native `title` tooltip completing a truncated `target` — only for short,
+  // single-line values (full path, URL, query). Never a long or multi-line blob
+  // (a whole exec command, a message body): a native tooltip can't scroll or be
+  // copied, so such content renders as an unreadable wall; the expandable detail
+  // is the channel for full content. Consumers bind `title` only when this is set.
   fullTarget?: string
   detail?: Component
-  isError?: boolean
-  // Non-zero exit of a finished exec; the row renders it through i18n.
-  exitCode?: number
   expandable?: boolean
   defaultOpen?: boolean
   diffAdd?: number
   diffRemove?: number
   hideAction?: boolean
-  // 'card' = output/diff/file content in a grayscale card; 'inline' = a
-  // half-embedded key:value list (params), no card. Defaults to 'card'.
-  detailVariant?: 'card' | 'inline'
+}
+
+// Missing input marks argument streaming; an empty object is a complete,
+// valid argument set for tools such as list_models.
+export function getToolTitle(
+  block: ToolCallBlock,
+  translate: (key: string, params: Record<string, unknown>) => string,
+) {
+  const display = getToolDisplay(block)
+  const pending = !block.done && block.input == null
+  const pendingKey = ['write', 'edit', 'apply_patch'].includes(display.actionKey)
+    ? display.actionKey : 'generic'
+  const action = pending
+    ? translate(`chat.tools.pending.${pendingKey}`, {})
+    : translate(`chat.tools.${display.actionKey}`, display.actionParams ?? {})
+  const showAction = pending || !display.hideAction
+  const label = [showAction ? action : '', display.target].filter(Boolean).join(' ')
+  return { display, pending, action, showAction, label }
 }
 
 const FILE_PATH_TOOLS = new Set(['read', 'write', 'edit', 'list'])
@@ -127,10 +144,7 @@ export function isDirPathTool(toolName: string): boolean {
   return toolName === 'list'
 }
 
-// Read-only / no-side-effect tools form an "explore" segment; everything else
-// (write, edit, exec, send, schedule mutations, …) is an "action" segment.
-// Consecutive tools of the same category are grouped together; reasoning rides
-// along with whichever segment it sits next to.
+// Read-only tools contribute lookup counts to the process summary.
 const READONLY_TOOLS = new Set([
   'read', 'list', 'web_search', 'web_fetch', 'search_memory', 'search_messages',
   'list_execution_locations',
@@ -174,35 +188,45 @@ export function toolBucket(toolName: string): ToolBucket {
   return 'other'
 }
 
-// GUI tools (browser + computer) interleave read-only "observe" and
-// side-effecting "action" calls as one continuous browsing activity. Splitting
-// them on every observe↔action flip would strand each step in its own segment,
-// so they share a single category and stay grouped together.
-export type ToolSegmentCategory = 'explore' | 'action' | 'gui'
+// Fragment kinds for the group header's details half — the bare counts that
+// follow the phase verb ("Explored 12 file operations, 4 searches, ran 3 commands").
+// Finer-grained than ToolBucket on purpose: 'browse' lumps reads and searches
+// together, but a research run reporting "8 file operations" when 6 calls
+// were web searches is the header lying. File tools deliberately count calls,
+// not unique files: one patch may touch several files and repeated reads may
+// target the same path. Anything not listed falls to 'steps' so the header
+// degrades to a plain step count instead of inventing a noun.
+export type SummaryFragment = 'fileOperations' | 'searches' | 'commands' | 'messages' | 'schedules' | 'media' | 'agents' | 'steps'
+
+const FRAGMENT_TOOLS: Array<[SummaryFragment, Set<string>]> = [
+  ['fileOperations', new Set(['read', 'list', 'write', 'edit', 'apply_patch'])],
+  ['commands', new Set(['exec'])],
+  ['messages', new Set(['send', 'react', 'send_email', 'speak'])],
+  ['schedules', new Set(['create_schedule', 'update_schedule', 'delete_schedule'])],
+  ['media', new Set(['generate_image', 'generate_video', 'transcribe_audio'])],
+  ['agents', new Set(['spawn_agent', 'send_message', 'list_agents'])],
+]
+
+export const SUMMARY_FRAGMENT_ORDER: SummaryFragment[] = [
+  'fileOperations', 'searches', 'commands', 'messages', 'schedules', 'media', 'agents', 'steps',
+]
+
+export function toolFragmentKind(toolName: string): SummaryFragment {
+  for (const [kind, names] of FRAGMENT_TOOLS) {
+    if (names.has(toolName)) return kind
+  }
+  // Read-only lookups (web/memory/message search, list_*/get_*, email reads,
+  // bg status, waits) all read to the user as "it looked something up" — one
+  // 'searches' counter keeps the header to one clause instead of a taxonomy.
+  return isReadOnlyTool(toolName) ? 'searches' : 'steps'
+}
 
 export function isGuiTool(toolName: string): boolean {
   return isGuiToolName(toolName)
 }
 
-// Segment category used to group consecutive tool calls in a process run.
-export function toolSegmentCategory(toolName: string): ToolSegmentCategory {
-  if (isGuiToolName(toolName)) return 'gui'
-  return isReadOnlyTool(toolName) ? 'explore' : 'action'
-}
-
-// An image read (e.g. the path a browser/computer screenshot was saved to) is
-// the model looking at a picture — an observation that belongs with the
-// surrounding GUI activity, not a standalone file-exploration read. Folding it
-// in keeps the "navigate → screenshot → look" loop as one browsing segment.
 const IMAGE_READ_EXT = /\.(png|jpe?g|gif|webp|bmp|avif)$/i
 const PDF_READ_EXT = /\.pdf$/i
-
-export function toolSegmentCategoryForBlock(block: ToolCallBlock): ToolSegmentCategory {
-  if (block.toolName === 'read' && IMAGE_READ_EXT.test(pickString(asObject(block.input), 'path'))) {
-    return 'gui'
-  }
-  return toolSegmentCategory(block.toolName)
-}
 
 function asObject(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' ? (value as Record<string, unknown>) : {}
@@ -267,7 +291,8 @@ function firstLine(s: string, max = 80): string {
 
 function lineCount(s: string): number {
   if (!s) return 0
-  return s.split('\n').length
+  const lines = s.split('\n')
+  return lines.at(-1) === '' ? lines.length - 1 : lines.length
 }
 
 function resultObject(block: ToolCallBlock): Record<string, unknown> {
@@ -296,8 +321,22 @@ function normalizePatchOperation(value: unknown): PatchFileTarget['operation'] |
   return ''
 }
 
+function patchFilesFromChanges(value: unknown): PatchFileTarget[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((item) => {
+      const obj = asObject(item)
+      const path = pickString(obj, 'path')
+      const operation = normalizePatchOperation(asObject(obj.kind).type ?? obj.kind ?? obj.operation)
+      return path && operation ? { operation, path } : null
+    })
+    .filter((item): item is PatchFileTarget => Boolean(item))
+}
+
 function patchFilesFromResult(block: ToolCallBlock): PatchFileTarget[] {
   const result = resultObject(block)
+  const changes = patchFilesFromChanges(result.changes)
+  if (changes.length > 0) return changes
   const rawFiles = result.files
   if (Array.isArray(rawFiles)) {
     return rawFiles
@@ -352,6 +391,25 @@ function patchLineCounts(patch: string): { add: number; remove: number } {
   for (const line of patch.split('\n')) {
     if (line.startsWith('+')) add++
     else if (line.startsWith('-') && !line.startsWith('***')) remove++
+  }
+  return { add, remove }
+}
+
+function changeLineCounts(value: unknown): { add: number; remove: number } {
+  if (!Array.isArray(value)) return { add: 0, remove: 0 }
+  let add = 0
+  let remove = 0
+  for (const item of value) {
+    const obj = asObject(item)
+    const diff = pickString(obj, 'diff')
+    const operation = normalizePatchOperation(asObject(obj.kind).type ?? obj.kind ?? obj.operation)
+    if (operation === 'add') add += lineCount(diff)
+    else if (operation === 'delete') remove += lineCount(diff)
+    else {
+      const counts = patchLineCounts(diff)
+      add += counts.add
+      remove += counts.remove
+    }
   }
   return { add, remove }
 }
@@ -554,30 +612,9 @@ function guiActionVariant(action: string, input: Record<string, unknown>): strin
   return ''
 }
 
-// A result the runtime marked as failed. Kept separate from the per-tool
-// display so every tool — including ones with no dedicated case — renders its
-// failures in destructive ink instead of looking like a clean call.
-function isErrorResult(block: ToolCallBlock): boolean {
-  const result = asObject(block.result)
-  if (result.isError === true) return true
-  return asObject(result.structuredContent).isError === true
-}
-
-// A non-zero exit is the one machine-readable failure detail worth carrying on
-// the collapsed row; everything else stays in the expanded output.
-function execExitCode(block: ToolCallBlock): number {
-  return pickNumber(resultObject(block), 'exit_code', 'exitCode')
-}
-
+// 工具结果中的错误供 Agent 自行检查和恢复，不代表用户任务失败。
+// 不把 isError / 非零退出码提升成标题状态；原始结果仍交给详情组件展示。
 export function getToolDisplay(block: ToolCallBlock): ToolDisplay {
-  const display = resolveToolDisplay(block)
-  if (!block.done) return display
-  const exitCode = block.toolName === 'exec' ? execExitCode(block) : 0
-  if (!exitCode && !isErrorResult(block)) return display
-  return { ...display, isError: true, exitCode: exitCode || undefined }
-}
-
-function resolveToolDisplay(block: ToolCallBlock): ToolDisplay {
   const input = asObject(block.input)
 
   switch (block.toolName) {
@@ -610,6 +647,24 @@ function resolveToolDisplay(block: ToolCallBlock): ToolDisplay {
       return { ...variant, target: basename(path), fullTarget: path, detail: ToolCallDetailOutput }
     }
     case 'write': {
+      const result = resultObject(block)
+      const changes = patchFilesFromChanges(input.changes)
+      const files = changes.length > 0 ? changes : patchFilesFromResult(block)
+      if (files.length > 0) {
+        const target = files.length === 1 ? basename(files[0]!.path) : `${files.length} files`
+        const fullTarget = files.map(file => `${PATCH_OPERATION_MARK[file.operation]} ${file.path}`).join('\n')
+        const counts = changeLineCounts(Array.isArray(input.changes) ? input.changes : result.changes)
+        return {
+          icon: FilePen,
+          actionKey: 'write',
+          target,
+          fullTarget,
+          detail: ToolCallDetailApplyPatch,
+          defaultOpen: true,
+          diffAdd: counts.add,
+          diffRemove: counts.remove,
+        }
+      }
       const path = pickString(input, 'path')
       const content = pickString(input, 'content')
       const contentLineCount = pickNumber(input, 'content_line_count')
@@ -664,42 +719,44 @@ function resolveToolDisplay(block: ToolCallBlock): ToolDisplay {
     }
     case 'list': {
       const path = pickString(input, 'path')
-      return { icon: FolderOpen, actionKey: 'list', target: basename(path), fullTarget: path, detail: ToolCallDetailOutput }
+      return { icon: FolderOpen, actionKey: 'list', target: path, fullTarget: path, detail: ToolCallDetailOutput }
     }
     case 'list_execution_locations':
-      return { icon: Monitor, actionKey: 'list_execution_locations', target: '', expandable: true, detailVariant: 'inline' }
+      return { icon: Monitor, actionKey: 'list_execution_locations', target: '', expandable: true }
     case 'exec': {
       const cmd = pickString(input, 'command')
+      const description = pickString(input, 'description').trim()
       const background = input.run_in_background === true || input.runInBackground === true
       return {
         icon: SquareTerminal,
         actionKey: background ? 'exec_background' : 'exec',
-        target: firstLine(cmd, 80),
-        fullTarget: cmd,
+        // No fullTarget: the full command lives in the exec detail, not a tooltip.
+        target: firstLine(description || cmd, 80),
+        hideAction: Boolean(description),
         detail: ToolCallDetailExec,
       }
     }
     case 'bg_status': {
       const action = pickString(input, 'action') || 'list'
-      return { icon: ListChecks, actionKey: 'bg_status', target: action, expandable: true, detailVariant: 'inline' }
+      return { icon: ListChecks, actionKey: 'bg_status', target: action, expandable: true }
     }
     case 'list_background':
-      return { icon: ListChecks, actionKey: 'list_background', target: '', expandable: true, detailVariant: 'inline' }
+      return { icon: ListChecks, actionKey: 'list_background', target: '', expandable: true }
     case 'get_background_status': {
       const taskId = pickString(input, 'task_id', 'taskId')
-      return { icon: SearchCheck, actionKey: 'get_background_status', target: taskId, expandable: true, detailVariant: 'inline' }
+      return { icon: SearchCheck, actionKey: 'get_background_status', target: taskId, expandable: true }
     }
     case 'kill_background': {
       const taskId = pickString(input, 'task_id', 'taskId')
-      return { icon: X, actionKey: 'kill_background', target: taskId, expandable: true, detailVariant: 'inline' }
+      return { icon: X, actionKey: 'kill_background', target: taskId, expandable: true }
     }
     case 'wait': {
       const duration = pickNumber(input, 'duration')
-      return { icon: Timer, actionKey: 'wait', target: duration ? `${duration}s` : '', expandable: true, detailVariant: 'inline' }
+      return { icon: Timer, actionKey: 'wait', target: duration ? `${duration}s` : '', expandable: true }
     }
     case 'wait_until': {
       const taskId = pickString(input, 'task_id', 'taskId')
-      return { icon: Timer, actionKey: 'wait_until', target: taskId, expandable: true, detailVariant: 'inline' }
+      return { icon: Timer, actionKey: 'wait_until', target: taskId, expandable: true }
     }
     case 'web_search': {
       const query = pickString(input, 'query')
@@ -755,10 +812,9 @@ function resolveToolDisplay(block: ToolCallBlock): ToolDisplay {
           actionKey: 'react_remove',
           target: pickString(input, 'message_id'),
           expandable: true,
-          detailVariant: 'inline',
         }
       }
-      return { icon: Smile, actionKey: 'react', target: emoji, expandable: true, detailVariant: 'inline' }
+      return { icon: Smile, actionKey: 'react', target: emoji, expandable: true }
     }
     case 'get_contacts': {
       return {
@@ -776,7 +832,6 @@ function resolveToolDisplay(block: ToolCallBlock): ToolDisplay {
         actionKey,
         target: pickString(input, 'platform'),
         expandable: true,
-        detailVariant: 'inline',
       }
     }
     case 'search_messages': {
@@ -789,7 +844,6 @@ function resolveToolDisplay(block: ToolCallBlock): ToolDisplay {
         target: keyword ? `"${keyword}"` : '',
         fullTarget: keyword,
         expandable: true,
-        detailVariant: 'inline',
       }
     }
     case 'get_messages': {
@@ -800,13 +854,12 @@ function resolveToolDisplay(block: ToolCallBlock): ToolDisplay {
         actionKey: messageId ? 'get_messages_one' : 'get_messages',
         target: messageId || sessionId,
         expandable: true,
-        detailVariant: 'inline',
       }
     }
     case 'list_models':
-      return { icon: Boxes, actionKey: 'list_models', target: '', expandable: true, detailVariant: 'inline' }
+      return { icon: Boxes, actionKey: 'list_models', target: '', expandable: true }
     case 'list_workdirs':
-      return { icon: FolderTree, actionKey: 'list_workdirs', target: '', expandable: true, detailVariant: 'inline' }
+      return { icon: FolderTree, actionKey: 'list_workdirs', target: '', expandable: true }
     case 'list_acp_agents': {
       const agentId = pickString(input, 'agent_id', 'agentId')
       return {
@@ -816,7 +869,6 @@ function resolveToolDisplay(block: ToolCallBlock): ToolDisplay {
         actionKey: agentId ? 'list_acp_agents_one' : 'list_acp_agents',
         target: agentId,
         expandable: true,
-        detailVariant: 'inline',
       }
     }
     case 'list_schedule':
@@ -827,7 +879,6 @@ function resolveToolDisplay(block: ToolCallBlock): ToolDisplay {
         actionKey: 'get_schedule',
         target: pickString(input, 'id'),
         expandable: true,
-        detailVariant: 'inline',
       }
     case 'create_schedule':
       return {
@@ -835,14 +886,12 @@ function resolveToolDisplay(block: ToolCallBlock): ToolDisplay {
         actionKey: 'create_schedule',
         target: pickString(input, 'name'),
         expandable: true,
-        detailVariant: 'inline',
       }
     case 'update_schedule':
       return {
         ...updateScheduleVariant(input),
         target: pickString(input, 'name', 'id'),
         expandable: true,
-        detailVariant: 'inline',
       }
     case 'delete_schedule':
       return {
@@ -850,7 +899,6 @@ function resolveToolDisplay(block: ToolCallBlock): ToolDisplay {
         actionKey: 'delete_schedule',
         target: pickString(input, 'id'),
         expandable: true,
-        detailVariant: 'inline',
       }
     case 'list_email_accounts':
       return {
@@ -868,7 +916,6 @@ function resolveToolDisplay(block: ToolCallBlock): ToolDisplay {
         target: subject || to,
         fullTarget: subject ? `${to} — ${subject}` : to,
         expandable: true,
-        detailVariant: 'inline',
       }
     }
     case 'list_email':
@@ -896,7 +943,6 @@ function resolveToolDisplay(block: ToolCallBlock): ToolDisplay {
         target: truncate(text, 60),
         fullTarget: text,
         expandable: true,
-        detailVariant: 'inline',
       }
     }
     case 'transcribe_audio': {
@@ -913,7 +959,6 @@ function resolveToolDisplay(block: ToolCallBlock): ToolDisplay {
         actionKey: 'transcribe_audio',
         target,
         expandable: true,
-        detailVariant: 'inline',
       }
     }
     case 'generate_image': {
@@ -971,7 +1016,6 @@ function resolveToolDisplay(block: ToolCallBlock): ToolDisplay {
         actionKey: 'use_skill',
         target: pickString(input, 'skillName'),
         expandable: true,
-        detailVariant: 'inline',
       }
     case 'list_skills':
       return {
@@ -979,7 +1023,6 @@ function resolveToolDisplay(block: ToolCallBlock): ToolDisplay {
         actionKey: 'list_skills',
         target: '',
         expandable: true,
-        detailVariant: 'inline',
       }
     case 'browser_action': {
       const resolved = resolveGuiAction(BROWSER_ACTION_ICONS, 'browserAction', MousePointerClick, 'browser_action', pickString(input, 'action'), input)
@@ -1038,7 +1081,6 @@ function resolveToolDisplay(block: ToolCallBlock): ToolDisplay {
         target: truncate(title || request, 80),
         fullTarget: title || request,
         expandable: true,
-        detailVariant: 'inline',
       }
     }
     default:
@@ -1047,7 +1089,6 @@ function resolveToolDisplay(block: ToolCallBlock): ToolDisplay {
         actionKey: 'generic',
         target: block.toolName,
         expandable: true,
-        detailVariant: 'inline',
       }
   }
 }

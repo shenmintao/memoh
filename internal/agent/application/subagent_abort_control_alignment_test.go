@@ -30,7 +30,7 @@ func (b *terminalLoadFaultBackend) Load(ctx context.Context, key sessionruntime.
 }
 
 func TestSpawnCleanEndRacingAbortControlAlignsAllTerminals(t *testing.T) {
-	runs := &abortAlignmentLedger{}
+	runs := newAbortAlignmentLedger()
 	backend := &terminalLoadFaultBackend{MemoryBackend: sessionruntime.NewMemoryBackend()}
 	manager := sessionruntime.NewManager(backend, sessionruntime.Options{
 		OwnerID:       "clean-end-abort-owner",
@@ -68,9 +68,14 @@ func TestSpawnCleanEndRacingAbortControlAlignsAllTerminals(t *testing.T) {
 				if abortErr != nil || !applied {
 					t.Fatalf("AbortControl() = (%t, %v), want (true, nil)", applied, abortErr)
 				}
+			}
+			observation := publish(event)
+			if event.Type == native.EventAgentEnd {
+				// The terminal observer must return the outcome it committed without
+				// depending on a second snapshot read after the finishing proposal.
 				backend.failNextLoad.Store(true)
 			}
-			return publish(event)
+			return observation
 		}
 	})
 	terminalOutcome := tools.SpawnAttemptCompleted

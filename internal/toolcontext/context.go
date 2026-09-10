@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	contextfrag "github.com/felinics/memoh/internal/agent/context/fragment"
 	"github.com/felinics/memoh/internal/runtimefence"
 )
 
@@ -38,11 +39,17 @@ type Session struct {
 	CanListUserInput         bool
 	IsSubagent               bool
 	RuntimeActive            bool
-	SupportsImageInput       bool
-	SupportsFileInput        bool
-	RuntimeFence             runtimefence.Fence          `json:"-"`
-	RunContext               context.Context             `json:"-"`
-	RuntimeGuard             func(context.Context) error `json:"-"`
+	// RequireActiveRun declares that this session's tool surface exists only
+	// for the duration of a runtime turn. Workspace tool-gateway mounts set it;
+	// the general HTTP tool API remains available outside a turn.
+	RequireActiveRun          bool
+	SupportsImageInput        bool
+	SupportsFileInput         bool
+	ContextBudgetMaxTokens    int
+	ContextToolExchangePolicy *contextfrag.ToolExchangePolicy
+	RuntimeFence              runtimefence.Fence          `json:"-"`
+	RunContext                context.Context             `json:"-"`
+	RuntimeGuard              func(context.Context) error `json:"-"`
 }
 
 const runtimeGuardTimeout = 5 * time.Second
@@ -164,11 +171,20 @@ func Merge(base, latest Session) Session {
 	if latest.RuntimeActive {
 		merged.RuntimeActive = true
 	}
+	if latest.RequireActiveRun {
+		merged.RequireActiveRun = true
+	}
 	if latest.SupportsImageInput {
 		merged.SupportsImageInput = true
 	}
 	if latest.SupportsFileInput {
 		merged.SupportsFileInput = true
+	}
+	if latest.ContextBudgetMaxTokens > 0 {
+		merged.ContextBudgetMaxTokens = latest.ContextBudgetMaxTokens
+	}
+	if latest.ContextToolExchangePolicy != nil {
+		merged.ContextToolExchangePolicy = latest.ContextToolExchangePolicy
 	}
 	if latest.RuntimeFence.Valid() {
 		merged.RuntimeFence = latest.RuntimeFence

@@ -338,7 +338,7 @@ func TestRunCreateLifecycleRecordsSetupFailureAndLeavesBotReady(t *testing.T) {
 	}
 }
 
-func TestRunCreateLifecycleReturnsContractErrorAfterLeavingBotReady(t *testing.T) {
+func TestRunCreateLifecycleReturnsBootstrapErrorAfterLeavingBotReady(t *testing.T) {
 	botUUID := mustParseUUID("00000000-0000-0000-0000-000000000002")
 	botID := botUUID.String()
 	status := ""
@@ -355,15 +355,15 @@ func TestRunCreateLifecycleReturnsContractErrorAfterLeavingBotReady(t *testing.T
 		},
 	}
 	setupErr := errors.Join(
-		workspace.ErrWorkspaceImageIncompatible,
-		errors.New("missing /opt/memoh/toolkit/bin/node"),
+		workspace.ErrWorkspaceTemplateBootstrapFailed,
+		errors.New("write /data/AGENTS.md: permission denied"),
 	)
 	svc := NewService(nil, postgresstore.NewQueries(sqlc.New(db)))
 	svc.SetContainerLifecycle(&fakeContainerLifecycle{setupErr: setupErr})
 
 	err := svc.runCreateLifecycle(context.Background(), botID)
-	if !errors.Is(err, workspace.ErrWorkspaceImageIncompatible) {
-		t.Fatalf("run create lifecycle error = %v, want image incompatibility", err)
+	if !errors.Is(err, workspace.ErrWorkspaceTemplateBootstrapFailed) {
+		t.Fatalf("run create lifecycle error = %v, want template bootstrap failure", err)
 	}
 	if status != BotStatusReady {
 		t.Fatalf("bot status = %q, want %q", status, BotStatusReady)
@@ -542,4 +542,46 @@ func decodePersistedMetadata(t *testing.T, payload []byte) map[string]any {
 		t.Fatalf("decode metadata: %v", err)
 	}
 	return metadata
+}
+
+func TestResolveNameSuffixesDerivedNameCollisions(t *testing.T) {
+	taken := map[string]bool{"neko": true, "neko-2": true}
+	ownerUUID := mustParseUUID("00000000-0000-0000-0000-000000000001")
+
+	dbtx := &fakeDBTX{
+		queryRowFunc: func(_ context.Context, sql string, args ...any) pgx.Row {
+			if strings.Contains(sql, "FROM bots") && strings.Contains(sql, "name = $1") {
+				name, _ := args[0].(string)
+				if taken[name] {
+					return makeBotRow(mustParseUUID("00000000-0000-0000-0000-0000000000aa"), ownerUUID)
+				}
+			}
+			return &fakeRow{scanFunc: func(_ ...any) error { return pgx.ErrNoRows }}
+		},
+	}
+
+	svc := NewService(nil, postgresstore.NewQueries(sqlc.New(dbtx)))
+
+	// Derived names walk suffixes until free.
+	got, err := svc.resolveName(context.Background(), "", "Neko", "")
+	if err != nil {
+		t.Fatalf("resolveName derived: %v", err)
+	}
+	if got != "neko-3" {
+		t.Fatalf("expected neko-3, got %q", got)
+	}
+
+	// Free derived names stay unsuffixed.
+	got, err = svc.resolveName(context.Background(), "", "Mimi", "")
+	if err != nil {
+		t.Fatalf("resolveName free derived: %v", err)
+	}
+	if got != "mimi" {
+		t.Fatalf("expected mimi, got %q", got)
+	}
+
+	// Explicitly requested names still fail when taken.
+	if _, err := svc.resolveName(context.Background(), "neko", "", ""); !errors.Is(err, ErrBotNameTaken) {
+		t.Fatalf("expected ErrBotNameTaken, got %v", err)
+	}
 }

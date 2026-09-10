@@ -30,9 +30,9 @@ func (*workdirRunner) StartSession(context.Context, client.StartRequest, client.
 func TestColdStartUsesPersistedWorkdirInsteadOfPrimaryTarget(t *testing.T) {
 	t.Parallel()
 	runner := &workdirRunner{}
-	pool := newSessionPool(nil, runner, fakeBotGetter{bot: enabledACPBot("bot-1", "self", nil)})
+	pool := newSessionPool(nil, runner, fakeBotGetter{bot: enabledACPAgentBot("bot-1", "acp", "api_key", nil)})
 	pool.store = workdirDescriptor{}
-	handle := &runtimeHandle{id: "runtime-1", botID: "bot-1", agentID: "codex", boundSession: "session-1"}
+	handle := &runtimeHandle{id: "runtime-1", botID: "bot-1", agentID: "acp", boundSession: "session-1"}
 	ctx := workspace.WithWorkspaceTarget(context.Background(), workspace.WorkspaceTargetNative)
 	if err := pool.startRuntime(ctx, handle, startOptions{}); err == nil {
 		t.Fatal("expected probe to stop startup")

@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
-import { postBotsByBotIdAgents, putBotsByBotIdSettings } from '@memohai/sdk'
+import { postBotsByBotIdAgents, postBotsByBotIdUserAccess, putBotsByBotIdSettings } from '@memohai/sdk'
 import type { BotsBot, BotsCreateBotRequest } from '@memohai/sdk'
 import {
   botCreateProgressPercent,
@@ -15,6 +15,7 @@ import {
   type BotCreateTerminalLine,
 } from '@/composables/api/botCreateTerminal'
 import { apiErrorStatus, parseMemohError, resolveApiErrorMessage } from '@/utils/api-error'
+import { botAgentRuntimeForProvider } from '@/utils/bot-agent'
 
 // status reflects the bot-create lifecycle:
 //   idle     - nothing in flight (also the guard for the progress route)
@@ -38,13 +39,23 @@ export type BotCreateSettings = {
 export type BotCreateAgent = {
   name: string
   provider: string
-  deferDefault?: boolean
+  metadata?: Record<string, unknown>
+}
+
+// Workspace access drafted on the create form. The creator's own grant is not
+// here — the server writes that itself when the bot is created — so this only
+// ever carries the members added alongside them.
+export type BotCreateGrant = {
+  subject_type: 'user' | 'everyone'
+  user_id?: string
+  permissions: string[]
 }
 
 export type StartBotCreateOptions = {
   display?: BotCreateDisplay
   settings?: BotCreateSettings
   agent?: BotCreateAgent
+  grants?: BotCreateGrant[]
 }
 
 export type BotCreateStartResult = {
@@ -62,6 +73,34 @@ function settingsBody(settings: BotCreateSettings) {
     ...(settings.chat_model_id ? { chat_model_id: settings.chat_model_id } : {}),
     ...(settings.memory_provider_id ? { memory_provider_id: settings.memory_provider_id } : {}),
     ...(settings.reasoning_effort ? { reasoning_effort: settings.reasoning_effort } : {}),
+  }
+}
+
+// Grants are applied one at a time and never fail the creation: the bot and its
+// owner already exist, so a rejected member is a partial share to fix on the
+// Access Control tab, not a reason to present the whole create as broken. Each
+// failure still surfaces as the setup error the progress view reads.
+async function applyGrants(
+  botId: string,
+  grants: BotCreateGrant[] | undefined,
+  onError?: (message: string) => void,
+): Promise<void> {
+  for (const grant of grants ?? []) {
+    if (grant.subject_type === 'user' && !grant.user_id) continue
+    if (grant.permissions.length === 0) continue
+    try {
+      await postBotsByBotIdUserAccess({
+        path: { bot_id: botId },
+        body: {
+          subject_type: grant.subject_type,
+          user_id: grant.subject_type === 'user' ? grant.user_id : undefined,
+          permissions: grant.permissions,
+        },
+        throwOnError: true,
+      })
+    } catch (error) {
+      onError?.(resolveApiErrorMessage(error, toMessage(error)))
+    }
   }
 }
 
@@ -158,44 +197,50 @@ export const useBotCreateProgressStore = defineStore('bot-create-progress', () =
       }
 
       const botId = createdBot.id
+      if (botId) {
+        await applyGrants(botId, options.grants, (message) => { setupError.value = message })
+      }
       if (botId && (hasSettings(options.settings) || options.agent)) {
         lines.value = pushBotCreateTerminalLine(lines.value, { kind: 'applying-settings', status: 'running' })
         if (options.agent) {
           try {
+            const provider = options.agent.provider.trim().toLowerCase()
             const { data: createdAgent } = await postBotsByBotIdAgents({
               path: { bot_id: botId },
               body: {
                 name: options.agent.name.trim(),
-                runtime: 'acp',
-                metadata: { provider: options.agent.provider.trim().toLowerCase() },
+                // codex / claude-code are direct runtimes; everything else is
+                // an ACP profile provider.
+                runtime: botAgentRuntimeForProvider(provider),
+                metadata: options.agent.metadata ?? { provider },
               },
               throwOnError: true,
             })
             createdAgentID = createdAgent.id?.trim() ?? ''
             if (!createdAgentID) throw new Error('Created Agent has no ID')
-            if (options.agent.deferDefault) agentApplied = true
           } catch (error) {
             setupError.value = resolveApiErrorMessage(error, toMessage(error))
             lines.value = finalizeBotCreateTerminalLines(lines.value, 'error')
           }
         }
         try {
-          if (hasSettings(options.settings) || (createdAgentID && !options.agent?.deferDefault)) {
+          if (hasSettings(options.settings) || createdAgentID) {
             await putBotsByBotIdSettings({
               path: { bot_id: botId },
               body: {
                 ...settingsBody(options.settings ?? {}),
-                ...(createdAgentID && !options.agent?.deferDefault
-                  ? { default_bot_agent_id: createdAgentID }
-                  : {}),
+                ...(createdAgentID ? { default_bot_agent_id: createdAgentID } : {}),
               },
               throwOnError: true,
             })
             if (hasSettings(options.settings)) settingsApplied = true
-            if (createdAgentID && !options.agent?.deferDefault) agentApplied = true
+            if (createdAgentID) agentApplied = true
           }
-        } catch {
-          // Bot created successfully, settings save failed; this is non-fatal.
+        } catch (error) {
+          // The bot exists, but its defaults are wrong — the created Agent is
+          // not the default, or settings were dropped. Surface the failure
+          // instead of showing a clean success over a half-configured bot.
+          setupError.value = resolveApiErrorMessage(error, toMessage(error))
           lines.value = finalizeBotCreateTerminalLines(lines.value, 'error')
         }
         if (settingsApplied && agentApplied) {

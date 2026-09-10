@@ -61,7 +61,7 @@ type blockingLifecycleCreateStore struct {
 func (s *blockingLifecycleCreateStore) CreateContextLifecycle(
 	ctx context.Context,
 	arg sqlc.CreateContextLifecycleParams,
-) (sqlc.ContextLifecycle, error) {
+) (sqlc.CreateContextLifecycleRow, error) {
 	close(s.started)
 	<-s.release
 	return s.recordingContextLifecycleStore.CreateContextLifecycle(ctx, arg)
@@ -168,7 +168,7 @@ func TestACPGenericPromptFailurePublishesSanitizedErroredTerminalToChatAndDiscus
 		t.Fatalf("streamACPAgentWS() error = %v", err)
 	}
 	events := drainAgentEvents(t, eventCh)
-	assertACPFailedTerminal(t, events, "acp_runtime_prompt_failed", privateDetail)
+	assertACPFailedTerminal(t, events, "runtime_prompt_failed", privateDetail)
 	requireACPLifecycle(t, lifecycles, lifecycleTestRunID, contextLifecycleStatusFailedProvider)
 
 	chunks := make([]string, 0, len(events))
@@ -327,7 +327,7 @@ func assertPublishedErroredTerminal(t *testing.T, events []native.StreamEvent) {
 }
 
 // reconcileOutcomeQueries fakes the commit-unknown reconciliation store: it
-// answers LockSessionForCommitReconciliation + GetACPRoundOutcome inside a
+// answers LockSessionForCommitReconciliation + GetRuntimeRoundOutcome inside a
 // pass-through transaction, can fail a configurable number of attempts first,
 // and signals when the background retry's projection cleanup runs.
 type reconcileOutcomeQueries struct {
@@ -339,6 +339,10 @@ type reconcileOutcomeQueries struct {
 }
 
 func (*reconcileOutcomeQueries) SupportsTransactions() bool { return true }
+
+func (*reconcileOutcomeQueries) ListCompactionArtifactLineageBySession(context.Context, pgtype.UUID) ([]sqlc.BotHistoryMessageCompact, error) {
+	return nil, nil
+}
 
 func (q *reconcileOutcomeQueries) InTx(_ context.Context, fn func(dbstore.Queries) error) error {
 	q.mu.Lock()
@@ -362,7 +366,7 @@ func (*reconcileOutcomeQueries) LockSessionForCommitReconciliation(
 	return pgtype.UUID{}, nil
 }
 
-func (q *reconcileOutcomeQueries) GetACPRoundOutcome(context.Context, sqlc.GetACPRoundOutcomeParams) (string, error) {
+func (q *reconcileOutcomeQueries) GetRuntimeRoundOutcome(context.Context, sqlc.GetRuntimeRoundOutcomeParams) (string, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if q.outcome == "" {
@@ -371,8 +375,8 @@ func (q *reconcileOutcomeQueries) GetACPRoundOutcome(context.Context, sqlc.GetAC
 	return q.outcome, nil
 }
 
-func (q *reconcileOutcomeQueries) DeleteACPDecisionProjectionsByRun(
-	context.Context, sqlc.DeleteACPDecisionProjectionsByRunParams,
+func (q *reconcileOutcomeQueries) DeleteRuntimeDecisionProjectionsByRun(
+	context.Context, sqlc.DeleteRuntimeDecisionProjectionsByRunParams,
 ) (int64, error) {
 	select {
 	case q.projectionsSwept <- struct{}{}:
@@ -382,7 +386,7 @@ func (q *reconcileOutcomeQueries) DeleteACPDecisionProjectionsByRun(
 }
 
 // TestACPCommitUnknownResolutionMatrix pins the three-way commit-unknown
-// resolution contract of resolveACPRoundPersistFailure through the completed
+// resolution contract of resolveRuntimeRoundPersistFailure through the completed
 // -turn path, plus the incomplete-abort rollback path. Two invariants hold in
 // every cell: the eagerly persisted leading user message is never deleted,
 // and the warm runtime is only discarded on a PROVEN rollback of a completed

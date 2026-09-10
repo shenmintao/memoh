@@ -289,10 +289,14 @@ func (s *Service) nameTaken(ctx context.Context, normalized, excludeBotID string
 }
 
 // resolveName validates and (when empty) derives a bot name from displayName,
-// then ensures it is unique. excludeBotID is ignored during uniqueness checks.
+// then ensures it is unique. A derived name that collides gets a numeric
+// suffix (neko-2, neko-3, ...) instead of failing: the caller never picked a
+// slug, so a slug collision is not theirs to fix. An explicitly requested
+// name still fails with ErrBotNameTaken when taken.
 func (s *Service) resolveName(ctx context.Context, rawName, displayName, excludeBotID string) (string, error) {
 	normalized := normalizeName(rawName)
-	if normalized == "" {
+	derived := normalized == ""
+	if derived {
 		normalized = slugify(displayName)
 	}
 	switch validateNameFormat(normalized) {
@@ -305,10 +309,24 @@ func (s *Service) resolveName(ctx context.Context, rawName, displayName, exclude
 	if err != nil {
 		return "", err
 	}
-	if taken {
+	if !taken {
+		return normalized, nil
+	}
+	if !derived {
 		return "", ErrBotNameTaken
 	}
-	return normalized, nil
+	// slugify clamps to 48 chars, so any suffix keeps the candidate within
+	// the 63-char format limit.
+	for i := 2; ; i++ {
+		candidate := fmt.Sprintf("%s-%d", normalized, i)
+		taken, err := s.nameTaken(ctx, candidate, excludeBotID)
+		if err != nil {
+			return "", err
+		}
+		if !taken {
+			return candidate, nil
+		}
+	}
 }
 
 // ListByOwner returns bots owned by the given user.
@@ -598,8 +616,7 @@ func (s *Service) runCreateLifecycle(ctx context.Context, botID string) error {
 					slog.Any("error", recordErr),
 				)
 			}
-			if errors.Is(err, workspace.ErrWorkspaceImageIncompatible) ||
-				errors.Is(err, workspace.ErrWorkspaceTemplateBootstrapFailed) {
+			if errors.Is(err, workspace.ErrWorkspaceTemplateBootstrapFailed) {
 				setupErr = err
 			}
 		} else if clearErr := s.ClearContainerSetupFailure(lifecycleCtx, botID); clearErr != nil {
@@ -662,6 +679,21 @@ func (s *Service) runDeleteLifecycle(ctx context.Context, botID string) {
 	botUUID, err := db.ParseUUID(botID)
 	if err != nil {
 		s.logger.Error("invalid bot id while finalizing delete",
+			slog.String("bot_id", botID),
+			slog.Any("error", err),
+		)
+		revertToReady()
+		return
+	}
+	// Agent credentials point at bot_agents from the credential side, so the
+	// bot cascade alone would leave every attached secret active forever.
+	// Revoke the ones no other bot references while the rows still exist.
+	// The bot's agent rows are the only references that can still find these
+	// credentials; deleting past a failed revocation would orphan active
+	// secrets forever. Treat it like the other blocking cleanups and keep a
+	// retry path by reverting to ready.
+	if err := s.queries.RevokeAgentCredentialsForBot(lifecycleCtx, botUUID); err != nil {
+		s.logger.Error("revoke agent credentials for deleted bot failed",
 			slog.String("bot_id", botID),
 			slog.Any("error", err),
 		)

@@ -21,6 +21,11 @@ export interface SessionSummary {
   updated_at?: string
   route_metadata?: Record<string, unknown>
   route_conversation_type?: string
+  /** Session's persisted (model, effort) pair (issue #879); empty = no memory. */
+  preferred_external_model_id?: string
+  model_preference_revision?: string
+  preferred_chat_model_id?: string
+  preferred_reasoning_effort?: string
 }
 
 // Bot-wide activity SSE: `/bots/{bot_id}/sessions/events`. Carries identifier
@@ -29,6 +34,8 @@ export interface SessionTouchedEvent {
   type: 'session_touched'
   session_id: string
   updated_at?: string
+  /** A persisted background notification may arrive without a live turn. */
+  reason?: 'background_task'
 }
 
 export interface SessionTitleChangedEvent {
@@ -55,12 +62,19 @@ export interface BotSessionActivityPingEvent {
   type: 'ping'
 }
 
+export interface SessionCompactionEvent {
+  type: 'session_compaction'
+  /** Complete, permission-filtered set of sessions currently compacting. */
+  session_ids: string[]
+}
+
 export type BotSessionActivityEvent =
   | SessionTouchedEvent
   | SessionTitleChangedEvent
   | SessionCreatedEvent
   | BotSessionActivityDroppedEvent
   | BotSessionActivityPingEvent
+  | SessionCompactionEvent
 
 export interface FetchMessagesOptions {
   limit?: number
@@ -267,9 +281,24 @@ export interface UIErrorMessage {
   type: 'error'
   code?: string
   content: string
+  // Machine-readable parameters of the feedback behind `code` (e.g. dep_id,
+  // required_version, install_task_id for agent_dependency_missing).
+  args?: Record<string, string>
 }
 
-export type UIMessage = UITextMessage | UIReasoningMessage | UIToolMessage | UIAttachmentsMessage | UIErrorMessage
+// Runtime degradation notice (tools unavailable, an interaction declined).
+// `name` carries the machine code, `content` the human-readable text.
+export interface UINoticeMessage {
+  id: number
+  type: 'notice'
+  name?: string
+  content: string
+  // Machine-readable parameters of the notice (the runtime_notice event's
+  // string metadata), for renderers that act on a specific `name`.
+  args?: Record<string, string>
+}
+
+export type UIMessage = UITextMessage | UIReasoningMessage | UIToolMessage | UIAttachmentsMessage | UIErrorMessage | UINoticeMessage
 
 export interface UISkillActivationSkill {
   name: string
@@ -377,6 +406,7 @@ export type RuntimeRunStatus =
   | 'running'
   | 'waiting_decision'
   | 'aborting'
+  | 'finishing'
   | 'completed'
   | 'aborted'
   | 'errored'
@@ -387,14 +417,6 @@ export interface RuntimeCursor {
   seq: number
 }
 
-export interface RuntimeSteerState {
-  id: string
-  status: string
-  text?: string
-  error?: string
-  created_at: string
-  updated_at: string
-}
 
 export interface RuntimeRunOperation {
   kind: 'retry' | 'edit'
@@ -416,10 +438,27 @@ export interface RuntimeCurrentRunView {
   updated_at: string
   messages: UIMessage[]
   request_user_turn?: UIUserTurn
+  // Ordered inputs already admitted into this run. The first entry is the
+  // request turn when present; later entries are applied steers.
+  user_turns?: UIUserTurn[]
+  // Live steer claims projected at their exact assistant-message
+  // boundary. Claimed entries are provisional; applied entries reference the
+  // settled history turn that replaces them.
+  steer_turns?: RuntimeSteerTurnView[]
   error_code?: string
   error?: string
-  steer?: RuntimeSteerState
+  proposed_terminal_status?: RuntimeRunStatus
+  finish_proposed_at?: string
   operation?: RuntimeRunOperation
+}
+
+export interface RuntimeSteerTurnView {
+  item_id: string
+  status: 'claimed' | 'applied'
+  text: string
+  turn_id?: string
+  after_message_id: number
+  timestamp: string
 }
 
 export interface RuntimeSnapshot {
@@ -436,7 +475,6 @@ export interface RuntimeCurrentRunPatch {
   status?: RuntimeRunStatus
   error_code?: string
   error?: string
-  steer?: RuntimeSteerState
   updated_at?: string
   owner_lease_expires_at?: string
 }
@@ -456,6 +494,9 @@ export interface RuntimeProgressAppend {
 export interface RuntimeDelta {
   current_run_view?: RuntimeCurrentRunView
   run?: RuntimeCurrentRunPatch
+  user_turn_upserts?: UIUserTurn[]
+  steer_turn_upserts?: RuntimeSteerTurnView[]
+  steer_turn_removals?: string[]
   message_appends?: RuntimeMessageAppend[]
   progress_appends?: RuntimeProgressAppend[]
   message_upserts?: UIMessage[]
@@ -501,7 +542,15 @@ export type UIRuntimeEvent =
   | UIRuntimeDeltaEvent
   | UIRuntimeDroppedEvent
 
+export interface UIStreamModelPreferenceSettledEvent {
+  type: 'model_preference_settled'
+  invocation_id: string
+  run_id: string
+  session_id: string
+}
+
 export type UIStreamEvent =
+  | UIStreamModelPreferenceSettledEvent
   | UIStreamRunAcceptedEvent
   | UIStreamRunRejectedEvent
   | UIStreamErrorEvent

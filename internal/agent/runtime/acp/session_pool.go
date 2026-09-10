@@ -20,12 +20,14 @@ import (
 
 	"github.com/google/uuid"
 
+	contextfrag "github.com/felinics/memoh/internal/agent/context/fragment"
 	toolapproval "github.com/felinics/memoh/internal/agent/decision/approval"
 	"github.com/felinics/memoh/internal/agent/decision/feedback"
 	userinput "github.com/felinics/memoh/internal/agent/decision/input"
 	"github.com/felinics/memoh/internal/agent/event"
 	"github.com/felinics/memoh/internal/agent/runtime/acp/client"
 	acpprofile "github.com/felinics/memoh/internal/agent/runtime/acp/profile"
+	"github.com/felinics/memoh/internal/agent/runtime/agentstate"
 	sessionruntime "github.com/felinics/memoh/internal/agent/runtime/session"
 	"github.com/felinics/memoh/internal/agent/sessionmode"
 	"github.com/felinics/memoh/internal/agent/turn"
@@ -53,9 +55,6 @@ const (
 	decisionQuiesceTimeout = 3 * time.Second
 
 	runtimeIDPrefix = "rt_"
-	// sessionStateIOTimeout bounds 512 MiB bridge/database streaming while
-	// allowing 200-300 MiB transcripts on ordinary container storage.
-	sessionStateIOTimeout = 10 * time.Minute
 )
 
 var (
@@ -96,7 +95,7 @@ type SessionPool struct {
 	runner         sessionRunner
 	bots           botGetter
 	store          SessionDescriptorReader
-	stateStore     SessionStateStore
+	stateStore     agentstate.SessionStateStore
 	sessionRuntime sessionRuntimeCoordinator
 	tools          *mcp.ToolGatewayService
 	contexts       *mcp.ToolSessionContextStore
@@ -130,10 +129,6 @@ type sessionRunner interface {
 	StartSession(ctx context.Context, req client.StartRequest, sink client.EventSink) (*client.Session, error)
 }
 
-type workspaceClientRunner interface {
-	MCPClient(ctx context.Context, botID string) (*bridge.Client, error)
-}
-
 type sessionUserInputService interface {
 	client.UserInputService
 	CancelPendingForSession(context.Context, string, string, string) ([]userinput.Request, error)
@@ -160,6 +155,12 @@ type SessionDescriptorReader interface {
 	Get(ctx context.Context, sessionID string) (SessionDescriptor, error)
 }
 
+// SessionPreferenceWriter is implemented by the Chat adapter. ACP keeps its
+// agent-owned IDs in runtime metadata, independently of native model UUIDs.
+type SessionPreferenceWriter interface {
+	SaveModelPreference(ctx context.Context, sessionID, modelID, effort string) error
+}
+
 // runtimeHandle is the single owner of one agent process. All internal code
 // operates on handles resolved through the pool's tenancy gate - never on
 // bare string IDs - so cleanup can only ever touch the runtime it resolved.
@@ -172,11 +173,7 @@ type runtimeHandle struct {
 	projectPath           string
 	cwd                   string
 	runtimeOwnerAccountID string
-	disableSessionState   bool
-	sessionStateSupported bool
-	sessionStateLocator   acpprofile.RuntimeSessionLocator
-	sessionStateCursor    client.SessionStateCursor
-	runtimeConfigEpoch    RuntimeConfigEpoch
+	runtimeConfigEpoch    agentstate.RuntimeConfigEpoch
 	// ownerCtx is a value-only context retained for detached runtime cleanup.
 	// Its cancellation and deadline do not describe request liveness.
 	ownerCtx context.Context
@@ -195,7 +192,6 @@ type runtimeHandle struct {
 	active                   *client.ToolSessionContext
 	persistenceFence         runtimefence.Fence
 	startCancel              context.CancelFunc
-	stagingCancel            context.CancelFunc
 	closed                   bool
 	hadPrompt                bool
 	decisionPreCleanupOnce   sync.Once
@@ -212,7 +208,7 @@ type runtimeHandle struct {
 	// is the authority: before every prompt the pool compares nativeHead with
 	// the durable head, and any divergence — a round that never committed,
 	// another server's turn, a history clear — destroys this warm generation.
-	nativeHead      SessionPublicationHead
+	nativeHead      agentstate.SessionPublicationHead
 	nativeHeadFound bool
 }
 
@@ -238,20 +234,22 @@ type PromptInput struct {
 	ChannelIdentityID        string
 	// SessionToken is consumed only by Prompt, where it flows into the
 	// per-prompt tool context overlay. Ensure and SetModel ignore it.
-	SessionToken          string //nolint:gosec // runtime session credential, not a hardcoded secret.
-	CurrentPlatform       string
-	ReplyTarget           string
-	ConversationType      string
-	CanRequestUserInput   bool
-	SupportsImageInput    bool
-	ToolOutputLimit       client.ToolOutputLimit
-	ToolHTTPURL           string
-	ContextURI            string
-	ContextMarkdown       string
-	RuntimeOwnerAccountID string
-	ForceFreshRuntime     bool
-	Sink                  client.EventSink
-	RuntimeGuard          func(context.Context) error
+	SessionToken              string //nolint:gosec // runtime session credential, not a hardcoded secret.
+	CurrentPlatform           string
+	ReplyTarget               string
+	ConversationType          string
+	CanRequestUserInput       bool
+	SupportsImageInput        bool
+	ToolOutputLimit           client.ToolOutputLimit
+	ToolHTTPURL               string
+	ContextURI                string
+	ContextMarkdown           string
+	RuntimeOwnerAccountID     string
+	ForceFreshRuntime         bool
+	ContextBudgetMaxTokens    int
+	ContextToolExchangePolicy *contextfrag.ToolExchangePolicy
+	Sink                      client.EventSink
+	RuntimeGuard              func(context.Context) error
 	// RequiredCommand is the exact agent-command selector the admission layer
 	// matched against a live runtime. After applying per-prompt configuration,
 	// the client Session re-validates it against its latest command snapshot at
@@ -259,8 +257,6 @@ type PromptInput struct {
 	// and prompt must still advertise the command, or the turn fails with
 	// ErrAgentCommandUnavailable instead of delivering stale slash text.
 	RequiredCommand string
-
-	disableSessionState bool
 }
 
 // ErrAgentCommandUnavailable reports that PromptInput.RequiredCommand is not
@@ -350,7 +346,7 @@ func (p *SessionPool) SetUserInputService(service sessionUserInputService) {
 // SetSessionStateStore enables durable adapter-native ACP session checkpoints.
 // It remains optional so embedders and focused pool tests do not need a
 // PostgreSQL dependency.
-func (p *SessionPool) SetSessionStateStore(store SessionStateStore) {
+func (p *SessionPool) SetSessionStateStore(store agentstate.SessionStateStore) {
 	if p != nil {
 		p.stateStore = store
 	}
@@ -417,7 +413,7 @@ func (p *SessionPool) CreateRuntime(ctx context.Context, input CreateRuntimeInpu
 	}
 	agentID := acpprofile.NormalizeAgentID(input.AgentID)
 	if agentID == "" {
-		agentID = acpprofile.AgentCodexID
+		return RuntimeStatus{}, errors.New("ACP agent id is required")
 	}
 	projectPath := strings.TrimSpace(input.ProjectPath)
 	runtimeOwnerAccountID := strings.TrimSpace(input.RuntimeOwnerAccountID)
@@ -558,7 +554,7 @@ func (p *SessionPool) BindRuntime(ctx context.Context, botID, runtimeID, session
 	}
 	normalizedAgent := acpprofile.NormalizeAgentID(agentID)
 	if normalizedAgent == "" {
-		normalizedAgent = acpprofile.AgentCodexID
+		return errors.New("ACP agent id is required")
 	}
 	projectPath = strings.TrimSpace(projectPath)
 
@@ -615,6 +611,7 @@ func (p *SessionPool) BindRuntime(ctx context.Context, botID, runtimeID, session
 	}
 	p.bySession[sessionID] = h.id
 	p.mu.Unlock()
+	p.persistModelPreference(opCtx, h)
 	return nil
 }
 
@@ -726,6 +723,7 @@ func (p *SessionPool) updateConfigOnHandle(
 		return RuntimeStatus{}, ErrRuntimeNotFound
 	}
 	if matches(sess) {
+		p.persistModelPreference(ctx, h)
 		return p.statusOf(h), nil
 	}
 
@@ -733,6 +731,7 @@ func (p *SessionPool) updateConfigOnHandle(
 	err := update(ctx, sess)
 	if err == nil {
 		h.setStatus(stateIdle)
+		p.persistModelPreference(ctx, h)
 		// Build the response before releasing h.op. Otherwise a concurrent
 		// setter can win the lock and make this request return its state.
 		return p.statusOf(h), nil
@@ -836,15 +835,9 @@ func (p *SessionPool) Prompt(ctx context.Context, input PromptInput) (client.Pro
 
 	p.reapIdle(time.Now())
 	if input.ForceFreshRuntime {
+		// Discuss turns inject a complete bounded context into a fresh
+		// process; closing the current runtime is all a fresh start needs.
 		_ = p.CloseSession(input.SessionID) //nolint:contextcheck // lifecycle close uses the handle owner context.
-		// Discuss turns inject a complete bounded context into a fresh process.
-		// Resuming or checkpointing that temporary native session would duplicate
-		// context and could replace a normal chat checkpoint. Note the full
-		// consequence: a completed fresh-runtime turn still publishes a RESET
-		// head for its session (canonical history advanced past anything
-		// resumable), so any prior checkpoint on the same session stops being
-		// cold-resumable by design.
-		input.disableSessionState = true
 		input.ForceFreshRuntime = false
 	}
 	// A handle can be torn down between resolution and use (reaper, agent
@@ -923,6 +916,8 @@ func (p *SessionPool) promptOnHandle(ctx context.Context, h *runtimeHandle, inpu
 		_ = p.teardown(h) //nolint:contextcheck // lifecycle close uses the handle owner context.
 		return client.PromptResult{}, false, fmt.Errorf("%w: %w", ErrRuntimeConfigUpdateFailed, err)
 	}
+
+	p.persistModelPreference(ctx, h)
 
 	toolSink := newPromptToolEventSink(input.Sink, input.ToolOutputLimit)
 	unregisterToolSink := p.registerToolEventSink(input, toolSink)
@@ -1011,35 +1006,16 @@ func (p *SessionPool) promptOnHandle(ctx context.Context, h *runtimeHandle, inpu
 		_ = p.teardown(h) //nolint:contextcheck // lifecycle close uses the handle owner context.
 		return result, false, err
 	}
-	staged, persistErr := p.persistSessionState(ctx, h, sess, input.RunID, toolCtx.RuntimeFence, result.StateReceipt)
-	if persistErr != nil {
-		p.logger.Error("failed to stage ACP session state",
-			slog.String("bot_id", h.botID),
-			slog.String("session_id", h.boundSession),
-			slog.String("run_id", input.RunID),
-			slog.String("runtime_id", h.id),
-			slog.Any("error", persistErr))
-		// A successful native turn without a durable staged snapshot cannot be
-		// published to canonical chat history: a cold restart would otherwise
-		// resume an older native context. Drop the warm process for every staging
-		// failure and return the partial result with an error so the application
-		// persists an explicit failed turn rather than a false success watermark.
-		_ = p.teardown(h) //nolint:contextcheck // failed checkpoint makes the warm native history unusable.
-		return result, false, fmt.Errorf("stage ACP session checkpoint: %w", persistErr)
-	}
-	result.CheckpointStaged = staged
-	// The native conversation has advanced past this run whether or not a
-	// snapshot was staged. Record the head this process now corresponds to;
-	// the application commits the matching durable head with the round, and
-	// the pre-prompt head comparison destroys this generation if it never does.
+	// The native conversation has advanced past this run. ACP publishes only
+	// reset heads (no runtime snapshots are captured); the head still moves
+	// per turn so cross-instance warm-handle fencing keeps working. Record
+	// the head this process now corresponds to; the application commits the
+	// matching durable head with the round, and the pre-prompt head
+	// comparison destroys this generation if it never does.
 	if p.stateStore != nil && strings.TrimSpace(h.boundSession) != "" {
 		if runID, parseErr := uuid.Parse(strings.TrimSpace(input.RunID)); parseErr == nil {
-			kind := SessionPublicationReset
-			if staged {
-				kind = SessionPublicationCheckpoint
-			}
 			h.state.Lock()
-			h.nativeHead = SessionPublicationHead{RunID: runID.String(), Kind: kind}
+			h.nativeHead = agentstate.SessionPublicationHead{RunID: runID.String(), Kind: agentstate.SessionPublicationReset}
 			h.nativeHeadFound = true
 			h.state.Unlock()
 		}
@@ -1098,18 +1074,18 @@ func (p *SessionPool) publicationHeadMatches(ctx context.Context, h *runtimeHand
 	return false, nil
 }
 
-func (p *SessionPool) loadRuntimeConfigEpoch(ctx context.Context, botID, sessionID string) (RuntimeConfigEpoch, error) {
+func (p *SessionPool) loadRuntimeConfigEpoch(ctx context.Context, botID, sessionID string) (agentstate.RuntimeConfigEpoch, error) {
 	if p == nil || p.stateStore == nil {
-		return RuntimeConfigEpoch{}, nil
+		return agentstate.RuntimeConfigEpoch{}, nil
 	}
 	epoch, err := p.stateStore.RuntimeConfigEpoch(ctx, botID, sessionID)
 	if err != nil {
-		return RuntimeConfigEpoch{}, fmt.Errorf("load ACP runtime config epoch: %w", err)
+		return agentstate.RuntimeConfigEpoch{}, fmt.Errorf("load ACP runtime config epoch: %w", err)
 	}
 	return epoch, nil
 }
 
-func publicationHeadsEqual(a SessionPublicationHead, aFound bool, b SessionPublicationHead, bFound bool) bool {
+func publicationHeadsEqual(a agentstate.SessionPublicationHead, aFound bool, b agentstate.SessionPublicationHead, bFound bool) bool {
 	if aFound != bFound {
 		return false
 	}
@@ -1121,163 +1097,32 @@ func publicationHeadsEqual(a SessionPublicationHead, aFound bool, b SessionPubli
 	return aErr == nil && bErr == nil && aRunID == bRunID && a.Kind == b.Kind
 }
 
-func (p *SessionPool) persistSessionState(
-	ctx context.Context,
-	h *runtimeHandle,
-	sess *client.Session,
-	runID string,
-	fence runtimefence.Fence,
-	receipt *client.SessionStateReceipt,
-) (bool, error) {
-	if p == nil || p.stateStore == nil || h == nil || sess == nil {
-		return false, nil
+// rememberedACPPair reads the session's persisted ACP (model, effort) pair
+// from runtime_metadata, written under the runtime operation lock.
+// Missing/unreadable metadata is an empty pair,
+// never an error: a cold start must fall back to the profile defaults rather
+// than fail.
+func (p *SessionPool) rememberedACPPair(ctx context.Context, sessionID string) (string, string) {
+	if p == nil || p.store == nil || sessionID == "" {
+		return "", ""
 	}
-	h.state.Lock()
-	disabled := h.disableSessionState
-	supported := h.sessionStateSupported
-	previousCursor := h.sessionStateCursor
-	locator := h.sessionStateLocator
-	sessionID := strings.TrimSpace(h.boundSession)
-	cwd := strings.TrimSpace(h.cwd)
-	h.state.Unlock()
-	if disabled || !supported || sessionID == "" || cwd == "" {
-		return false, nil
-	}
-	if locator == acpprofile.RuntimeSessionLocatorClaudeProject && receipt == nil {
-		// Claude freshness is proven by the raw SDK receipt. Without one (a
-		// non-"success" result subtype, or a receipt-channel inconsistency)
-		// the snapshot cannot be audited as this turn's state, so decline:
-		// the turn stays successful and publishes a reset head instead of an
-		// unprovable checkpoint.
-		p.logger.Warn("ACP turn completed without a session-state receipt; publishing a reset instead",
-			slog.String("bot_id", h.botID),
-			slog.String("session_id", sessionID),
-			slog.String("run_id", runID))
-		return false, nil
-	}
-	if !fence.Valid() {
-		return false, errors.New("runtime persistence fence is required for a durable ACP checkpoint")
-	}
-	runID = strings.TrimSpace(runID)
-	if _, err := uuid.Parse(runID); err != nil {
-		return false, fmt.Errorf("valid run_id is required for a durable ACP checkpoint: %w", err)
-	}
-
-	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionStateIOTimeout)
-	defer cancel()
-	// Staging deliberately survives the request context (a client disconnect
-	// must not lose the checkpoint), but a lifecycle close must be able to
-	// interrupt it: closeHandle cancels this instead of blocking on h.op for
-	// up to the full staging timeout. Re-check closed under the same lock so
-	// a close that already scanned for a cancel hook (and found none) cannot
-	// be outrun by this installation.
-	h.state.Lock()
-	if h.closed {
-		h.state.Unlock()
-		return false, errors.New("ACP runtime closed before checkpoint staging")
-	}
-	h.stagingCancel = cancel
-	h.state.Unlock()
-	defer func() {
-		h.state.Lock()
-		h.stagingCancel = nil
-		h.state.Unlock()
-	}()
-	persistCtx = runtimefence.WithContext(persistCtx, fence)
-	// The canonical head's per-file record counts are the append boundaries:
-	// capture snapshots a running digest at each so the store can prove the
-	// stored prefix is unchanged and persist only each file's tail. This read
-	// is advisory - Replace re-validates every proof inside its transaction.
-	var boundaries map[string]int64
-	if shapes, found, shapeErr := p.stateStore.CanonicalShape(persistCtx, h.botID, sessionID); shapeErr != nil {
-		p.logger.Warn("failed to load canonical ACP state shape; staging a full snapshot",
-			slog.String("bot_id", h.botID), slog.String("session_id", sessionID), slog.Any("error", shapeErr))
-	} else if found {
-		boundaries = make(map[string]int64, len(shapes))
-		for path, shape := range shapes {
-			boundaries[path] = shape.Records
-		}
-	}
-	var snapshot *client.SessionStateSnapshot
-	var captureErr error
-	// Codex emits its terminal protocol notification immediately before its
-	// final rollout flush barrier. Usually the barrier wins the ACP round trip,
-	// but a slow filesystem can briefly expose the previous stable transcript.
-	// Retry only this bounded post-success checkpoint window; never publish a
-	// state until its native completion cursor advances.
-	for attempt := 0; attempt < 4; attempt++ {
-		snapshot, captureErr = sess.SnapshotSessionState(persistCtx, previousCursor, receipt, boundaries)
-		if captureErr == nil {
-			break
-		}
-		if attempt == 3 {
-			return false, fmt.Errorf("capture advanced ACP JSONL: %w", captureErr)
-		}
-		timer := time.NewTimer(time.Duration(attempt+1) * 50 * time.Millisecond)
-		select {
-		case <-persistCtx.Done():
-			timer.Stop()
-			return false, fmt.Errorf("capture advanced ACP JSONL: %w", persistCtx.Err())
-		case <-timer.C:
-		}
-	}
-	defer func() { _ = snapshot.Close() }()
-	state := snapshot.State()
-	records, err := snapshot.Records()
+	desc, err := p.store.Get(ctx, sessionID)
 	if err != nil {
-		return false, err
+		p.logger.Warn("load ACP remembered pair failed; using profile defaults",
+			slog.String("session_id", sessionID),
+			slog.Any("error", err))
+		return "", ""
 	}
-	storeRecords := func(readCtx context.Context) (SessionStateRecord, error) {
-		record, readErr := records(readCtx)
-		if readErr != nil {
-			return SessionStateRecord{}, readErr
+	readKey := func(key string) string {
+		if desc.RuntimeMetadata == nil {
+			return ""
 		}
-		return SessionStateRecord{
-			FilePath: record.FilePath, LineNumber: record.LineNumber, Content: record.Content,
-		}, nil
-	}
-	shapes := snapshot.FileShapes()
-	files := make([]PersistedSessionStateFile, 0, len(shapes))
-	for _, shape := range shapes {
-		files = append(files, PersistedSessionStateFile{
-			SessionStateFileShape: SessionStateFileShape{
-				Path: shape.Path, Records: shape.Records, Digest: shape.Digest,
-			},
-			PrefixRecords: shape.PrefixRecords,
-			PrefixDigest:  shape.PrefixDigest,
-		})
-	}
-	if err := p.stateStore.Replace(persistCtx, h.botID, sessionID, PersistedSessionState{
-		AgentID:             h.agentID,
-		ACPSessionID:        state.SessionID,
-		ThroughRunID:        runID,
-		Cwd:                 cwd,
-		TranscriptPath:      state.TranscriptPath,
-		RuntimeFencingToken: fence.Token,
-		FileCount:           snapshot.FileCount(),
-		RecordCount:         snapshot.RecordCount(),
-		Files:               files,
-	}, storeRecords); err != nil {
-		if errors.Is(err, ErrSessionStateDivergent) {
-			// The agent rewrote or removed a canonical file, so this capture
-			// cannot extend the checkpoint without risking the still-canonical
-			// rows. Decline staging: the turn stays successful and publishes an
-			// explicit reset head, the warm runtime keeps its full context, and
-			// once the reset is canonical the next turn stages a fresh full
-			// snapshot safely.
-			p.logger.Warn("ACP session state diverged from the canonical checkpoint; publishing a reset instead",
-				slog.String("bot_id", h.botID),
-				slog.String("session_id", sessionID),
-				slog.String("run_id", runID),
-				slog.Any("error", err))
-			return false, nil
+		if v, ok := desc.RuntimeMetadata[key].(string); ok {
+			return strings.TrimSpace(v)
 		}
-		return false, err
+		return ""
 	}
-	h.state.Lock()
-	h.sessionStateCursor = snapshot.Cursor()
-	h.state.Unlock()
-	return true, nil
+	return readKey("acp_model_id"), readKey("acp_reasoning_effort")
 }
 
 // applyPromptConfig applies the per-turn composer selection while the caller
@@ -1412,7 +1257,8 @@ func (p *SessionPool) runtimeForSession(ctx context.Context, input PromptInput) 
 	identity := func() (agentID, projectPath, runtimeOwnerAccountID string, err error) {
 		agentID = acpprofile.NormalizeAgentID(input.AgentID)
 		if agentID == "" {
-			agentID = acpprofile.AgentCodexID
+			err = errors.New("ACP agent id is required")
+			return
 		}
 		projectPath = strings.TrimSpace(input.ProjectPath)
 		runtimeOwnerAccountID = strings.TrimSpace(input.RuntimeOwnerAccountID)
@@ -1474,7 +1320,6 @@ func (p *SessionPool) runtimeForSession(ctx context.Context, input PromptInput) 
 				projectPath:           projectPath,
 				runtimeOwnerAccountID: runtimeOwnerAccountID,
 				ownerCtx:              context.WithoutCancel(ctx),
-				disableSessionState:   input.disableSessionState,
 				status:                stateStarting,
 				lastActive:            time.Now(),
 				boundSession:          sessionID,
@@ -1503,8 +1348,7 @@ func (p *SessionPool) runtimeForSession(ctx context.Context, input PromptInput) 
 		}
 		h.state.Lock()
 		matches := h.agentID == agentID && h.projectPath == projectPath &&
-			h.runtimeOwnerAccountID == runtimeOwnerAccountID &&
-			h.disableSessionState == input.disableSessionState
+			h.runtimeOwnerAccountID == runtimeOwnerAccountID
 		closed := h.closed
 		starting := h.session == nil
 		if matches && !closed {
@@ -1609,7 +1453,6 @@ func (p *SessionPool) startRuntime(ctx context.Context, h *runtimeHandle, opts s
 	if err != nil {
 		return fail(fmt.Errorf("resolve ACP launch command: %w", err))
 	}
-	supportsSessionState := len(profile.RuntimeStorage.SessionRoots) > 0
 	resolved, err := client.ResolveSessionContext(client.SessionContextInput{
 		AgentID:       h.agentID,
 		SetupMode:     mode,
@@ -1620,18 +1463,11 @@ func (p *SessionPool) startRuntime(ctx context.Context, h *runtimeHandle, opts s
 	if err != nil {
 		return fail(fmt.Errorf("resolve ACP session context: %w", err))
 	}
-	if err := p.reconcileManagedACPConfig(startCtx, h.botID, profile, setup, mode, resolved, runtimeSyncGuard); err != nil {
-		return fail(fmt.Errorf("prepare %s managed config: %w", profile.DisplayName, err))
-	}
-	// Managed env (Claude Code BYOK tokens) is injected for every session.
-	// managedProcessEnv returns nil for self mode and for Codex, which is
-	// configured via CODEX_HOME files instead of env.
 	var env []string
 	env, err = managedProcessEnv(profile, setup.Managed, mode)
 	if err != nil {
 		return fail(err)
 	}
-	cleanEnv, unsetEnv := managedEnvControls(profile, mode, resolved.Backend)
 
 	toolHTTPURL, err := p.resolveToolHTTPURL(opts.ToolHTTPURL, workspaceInfo)
 	if err != nil {
@@ -1644,8 +1480,6 @@ func (p *SessionPool) startRuntime(ctx context.Context, h *runtimeHandle, opts s
 		Command:                command,
 		Args:                   arguments,
 		Env:                    env,
-		CleanEnv:               cleanEnv,
-		UnsetEnv:               unsetEnv,
 		Resolved:               &resolved,
 		SetupMode:              mode,
 		SessionMode:            profile.SessionModeID,
@@ -1663,114 +1497,30 @@ func (p *SessionPool) startRuntime(ctx context.Context, h *runtimeHandle, opts s
 		RuntimeSyncGuard: runtimeSyncGuard,
 	}
 	var (
-		restoredCursor     client.SessionStateCursor
-		canonicalHead      SessionPublicationHead
+		canonicalHead      agentstate.SessionPublicationHead
 		canonicalHeadFound bool
-		resumeSnapshot     *client.SessionStateSnapshot
 	)
-	defer func() {
-		if resumeSnapshot != nil {
-			_ = resumeSnapshot.Close()
-		}
-	}()
 	boundSession := strings.TrimSpace(h.boundSession)
 	if p.stateStore != nil && boundSession != "" {
 		canonicalHead, canonicalHeadFound, err = p.stateStore.Head(startCtx, h.botID, boundSession)
 		if err != nil {
 			return fail(fmt.Errorf("load ACP session publication head: %w", err))
 		}
-		if canonicalHeadFound {
-			if _, parseErr := uuid.Parse(strings.TrimSpace(canonicalHead.RunID)); parseErr != nil {
-				return fail(fmt.Errorf("%w: canonical ACP publication has invalid run id: %w", ErrSessionStateOutOfSync, parseErr))
-			}
-			if canonicalHead.Kind != SessionPublicationCheckpoint && canonicalHead.Kind != SessionPublicationReset {
-				return fail(fmt.Errorf("%w: canonical ACP publication has unknown kind %q", ErrSessionStateOutOfSync, canonicalHead.Kind))
-			}
-		}
-		if canonicalHeadFound && canonicalHead.Kind == SessionPublicationCheckpoint && !h.disableSessionState {
-			if !supportsSessionState {
-				return fail(fmt.Errorf("%w: current ACP profile cannot restore canonical checkpoint %s", ErrSessionStateOutOfSync, canonicalHead.RunID))
-			}
-			loadCtx, cancelLoad := context.WithTimeout(startCtx, sessionStateIOTimeout)
-			var persisted PersistedSessionState
-			found, loadErr := p.stateStore.Load(loadCtx, h.botID, boundSession, func(
-				consumeCtx context.Context,
-				state PersistedSessionState,
-				records SessionStateRecordReader,
-			) error {
-				persisted = state
-				if strings.TrimSpace(state.ThroughRunID) != strings.TrimSpace(canonicalHead.RunID) {
-					return fmt.Errorf(
-						"%w: loaded ACP checkpoint %s does not match canonical head %s",
-						ErrSessionStateOutOfSync,
-						state.ThroughRunID,
-						canonicalHead.RunID,
-					)
-				}
-				sameAgent := acpprofile.NormalizeAgentID(state.AgentID) == h.agentID
-				sameCwd := strings.TrimSpace(state.Cwd) == strings.TrimSpace(resolved.ProjectPath)
-				if !sameAgent || !sameCwd {
-					return fmt.Errorf(
-						"%w: canonical ACP checkpoint does not match current agent/workdir (agent_matches=%t, cwd_matches=%t)",
-						ErrSessionStateOutOfSync,
-						sameAgent,
-						sameCwd,
-					)
-				}
-				clientRecords := func(readCtx context.Context) (client.SessionStateRecord, error) {
-					record, readErr := records(readCtx)
-					if readErr != nil {
-						return client.SessionStateRecord{}, readErr
-					}
-					return client.SessionStateRecord{
-						FilePath: record.FilePath, LineNumber: record.LineNumber, Content: record.Content,
-					}, nil
-				}
-				var spoolErr error
-				resumeSnapshot, spoolErr = client.SpoolSessionState(
-					consumeCtx,
-					profile.RuntimeStorage.SessionLocator,
-					profile.RuntimeStorage.SessionRoots,
-					client.SessionState{
-						SessionID: state.ACPSessionID, TranscriptPath: state.TranscriptPath,
-					},
-					clientRecords,
-					state.FileCount,
-					state.RecordCount,
-				)
-				return spoolErr
-			})
-			cancelLoad()
-			if loadErr != nil {
-				return fail(fmt.Errorf("load ACP session checkpoint: %w", loadErr))
-			}
-			if !found {
-				return fail(fmt.Errorf("%w: canonical ACP checkpoint %s is unavailable", ErrSessionStateOutOfSync, canonicalHead.RunID))
-			}
-			if resumeSnapshot == nil || persisted.ACPSessionID == "" {
-				return fail(fmt.Errorf("%w: canonical ACP checkpoint did not produce a resumable snapshot", ErrSessionStateOutOfSync))
-			}
-			startReq.Resume = resumeSnapshot
+		if canonicalHeadFound && canonicalHead.Kind == agentstate.SessionPublicationCheckpoint {
+			// Snapshot capture was removed with the last locator-declaring
+			// profiles; a checkpoint head can only be a legacy row from before
+			// that. Start fresh instead of failing the session forever.
+			p.logger.Warn("ACP canonical head is a legacy checkpoint; starting a fresh native session",
+				slog.String("bot_id", h.botID),
+				slog.String("session_id", boundSession),
+				slog.String("run_id", canonicalHead.RunID))
 		}
 	}
 
-	runnerCtx := startCtx
-	cancelRunner := func() {}
-	if startReq.Resume != nil {
-		runnerCtx, cancelRunner = context.WithTimeout(startCtx, sessionStateIOTimeout)
-	}
-	sess, err := p.runner.StartSession(runnerCtx, startReq, opts.Sink)
-	cancelRunner()
+	sess, err := p.runner.StartSession(startCtx, startReq, opts.Sink)
 	if err != nil {
-		if startCtx.Err() != nil {
-			return fail(err)
-		}
-		if startReq.Resume != nil && sessionResumeIsOutOfSync(err) {
-			return fail(fmt.Errorf("%w: restore canonical ACP checkpoint: %w", ErrSessionStateOutOfSync, err))
-		}
 		return fail(err)
 	}
-	restoredCursor = sess.RestoredSessionStateCursor()
 	// Startup performs several protocol round trips after the guarded runtime
 	// staging read. Revalidate both the bot write guard and the complete epoch
 	// pair before publishing this process as reusable.
@@ -1789,10 +1539,37 @@ func (p *SessionPool) startRuntime(ctx context.Context, h *runtimeHandle, opts s
 		_ = sess.Close()
 		return fail(fmt.Errorf(
 			"%w: runtime configuration changed during startup (expected=%+v, actual=%+v)",
-			ErrRuntimeConfigStale,
+			agentstate.ErrRuntimeConfigStale,
 			epoch,
 			finalEpoch,
 		))
+	}
+
+	// Replay the session's remembered (model, effort) pair over the profile
+	// defaults Start just applied (issue #879, spec v2 §3.6 — without this,
+	// every cold start silently reverts the picker choice to the profile
+	// default). Model first: its authoritative response can replace the
+	// available reasoning options. A refused value keeps the agent's current
+	// state — while the agent is live, the agent is the truth.
+	if rememberedModel, rememberedEffort := p.rememberedACPPair(startCtx, boundSession); rememberedModel != "" || rememberedEffort != "" {
+		if rememberedModel != "" && strings.TrimSpace(sess.ModelState().CurrentModelID) != rememberedModel {
+			if _, err := sess.SetModel(startCtx, rememberedModel); err != nil {
+				p.logger.Warn("ACP remembered model rejected; keeping agent state",
+					slog.String("runtime_id", h.id),
+					slog.String("session_id", boundSession),
+					slog.String("model_id", rememberedModel),
+					slog.Any("error", err))
+			}
+		}
+		if rememberedEffort != "" && strings.TrimSpace(sess.ReasoningState().CurrentEffort) != rememberedEffort {
+			if _, err := sess.SetReasoningEffort(startCtx, rememberedEffort); err != nil {
+				p.logger.Warn("ACP remembered reasoning effort rejected; keeping agent state",
+					slog.String("runtime_id", h.id),
+					slog.String("session_id", boundSession),
+					slog.String("reasoning_effort", rememberedEffort),
+					slog.Any("error", err))
+			}
+		}
 	}
 
 	h.state.Lock()
@@ -1806,9 +1583,6 @@ func (p *SessionPool) startRuntime(ctx context.Context, h *runtimeHandle, opts s
 	}
 	h.session = sess
 	h.cwd = resolved.ProjectPath
-	h.sessionStateSupported = supportsSessionState
-	h.sessionStateLocator = profile.RuntimeStorage.SessionLocator
-	h.sessionStateCursor = restoredCursor
 	h.nativeHead = canonicalHead
 	h.nativeHeadFound = canonicalHeadFound
 	h.status = stateIdle
@@ -1817,12 +1591,6 @@ func (p *SessionPool) startRuntime(ctx context.Context, h *runtimeHandle, opts s
 	h.defaultModelID = strings.TrimSpace(sess.ModelState().CurrentModelID)
 	h.state.Unlock()
 	return nil
-}
-
-func sessionResumeIsOutOfSync(err error) bool {
-	return errors.Is(err, client.ErrSessionStateRestoreInvalid) ||
-		errors.Is(err, client.ErrSessionResumeUnsupported) ||
-		errors.Is(err, client.ErrSessionResumeRejected)
 }
 
 // RuntimeStatus reports the runtime state for a session, returning an idle
@@ -2144,7 +1912,6 @@ func (p *SessionPool) closeHandle(h *runtimeHandle) error {
 	sess := h.session
 	cancel := h.startCancel
 	h.startCancel = nil
-	stagingCancel := h.stagingCancel
 	bound := h.boundSession
 	activeSession := ""
 	fence := h.persistenceFence
@@ -2163,12 +1930,6 @@ func (p *SessionPool) closeHandle(h *runtimeHandle) error {
 
 	if cancel != nil {
 		cancel()
-	}
-	if stagingCancel != nil {
-		// An in-flight checkpoint staging runs detached from the request
-		// context; interrupt it so the prompt holder releases h.op promptly
-		// instead of streaming a snapshot this closed generation cannot use.
-		stagingCancel()
 	}
 	if sess != nil {
 		sess.CancelPrompt()
@@ -2251,7 +2012,6 @@ func (p *SessionPool) teardown(h *runtimeHandle) error {
 	h.session = nil
 	cancel := h.startCancel
 	h.startCancel = nil
-	stagingCancel := h.stagingCancel
 	bound := h.boundSession
 	activeSession := ""
 	fence := h.persistenceFence
@@ -2268,12 +2028,6 @@ func (p *SessionPool) teardown(h *runtimeHandle) error {
 	h.active = nil
 	closing := h.closeStarted
 	h.state.Unlock()
-	if stagingCancel != nil {
-		// Checkpoint staging runs detached from the request context; interrupt
-		// it so the prompt holder releases h.op and its spool slot promptly
-		// instead of streaming a snapshot this closed generation cannot use.
-		stagingCancel()
-	}
 	sessionID := strings.TrimSpace(bound)
 	if sessionID == "" {
 		sessionID = activeSession
@@ -2551,7 +2305,7 @@ func (p *SessionPool) resolveAgentSetup(ctx context.Context, botID, agentID stri
 			feedback.CodeAgentNotFound,
 			"unknown_agent",
 			http.StatusBadRequest,
-			"chat.acp.agentNotFound",
+			"chat.externalAgent.agentNotFound",
 			fmt.Sprintf("Unknown ACP agent %q", agentID),
 			map[string]string{"agent_id": agentID},
 		)
@@ -2569,7 +2323,7 @@ func (p *SessionPool) resolveAgentSetup(ctx context.Context, botID, agentID stri
 			feedback.CodeAgentNotEnabled,
 			"agent_not_enabled",
 			http.StatusForbidden,
-			"chat.acp.agentNotEnabled",
+			"chat.externalAgent.agentNotEnabled",
 			fmt.Sprintf("ACP agent %q is not enabled for this bot", agentID),
 			map[string]string{"agent_id": agentID},
 		)
@@ -2590,7 +2344,7 @@ func (p *SessionPool) resolveAgentSetup(ctx context.Context, botID, agentID stri
 			feedback.CodeAgentNotConfigured,
 			reason,
 			http.StatusBadRequest,
-			"chat.acp.agentNotConfigured",
+			"chat.externalAgent.agentNotConfigured",
 			fmt.Sprintf("%s %s", profile.DisplayName, reason),
 			map[string]string{"agent_id": agentID, "setup_mode": string(mode)},
 		)
@@ -2601,7 +2355,7 @@ func (p *SessionPool) resolveAgentSetup(ctx context.Context, botID, agentID stri
 			feedback.CodeAgentNotConfigured,
 			reason,
 			http.StatusBadRequest,
-			"chat.acp.agentNotConfigured",
+			"chat.externalAgent.agentNotConfigured",
 			fmt.Sprintf("%s %s", profile.DisplayName, reason),
 			map[string]string{"agent_id": agentID, "workspace_backend": workspaceInfo.Backend},
 		)
@@ -2612,7 +2366,7 @@ func (p *SessionPool) resolveAgentSetup(ctx context.Context, botID, agentID stri
 				feedback.CodeAgentNotConfigured,
 				"missing_managed_field",
 				http.StatusBadRequest,
-				"chat.acp.agentNotConfigured",
+				"chat.externalAgent.agentNotConfigured",
 				err.Error(),
 				map[string]string{"agent_id": agentID},
 			)
@@ -2694,6 +2448,12 @@ func (h *runtimeHandle) toolContext() mcp.ToolSessionContext {
 	if h.active.SupportsImageInput {
 		ctx.SupportsImageInput = true
 	}
+	if h.active.ContextBudgetMaxTokens != 0 {
+		ctx.ContextBudgetMaxTokens = h.active.ContextBudgetMaxTokens
+	}
+	if h.active.ContextToolExchangePolicy != nil {
+		ctx.ContextToolExchangePolicy = h.active.ContextToolExchangePolicy
+	}
 	if h.active.RuntimeFence.Valid() {
 		ctx.RuntimeFence = h.active.RuntimeFence
 	}
@@ -2739,13 +2499,15 @@ func toolSessionContext(ctx context.Context, input PromptInput, h *runtimeHandle
 		// PromptInput.ReasoningEffort is the current turn's explicit selection.
 		// The bot-stored fallback is loaded by SpawnProvider when this ACP tool
 		// context does not already carry one.
-		ReasoningRequestedEffort: strings.TrimSpace(input.ReasoningEffort),
-		CanRequestUserInput:      input.CanRequestUserInput,
-		IsSubagent:               false,
-		SupportsImageInput:       input.SupportsImageInput,
-		RuntimeFence:             fence,
-		RunContext:               ctx,
-		RuntimeGuard:             input.RuntimeGuard,
+		ReasoningRequestedEffort:  strings.TrimSpace(input.ReasoningEffort),
+		CanRequestUserInput:       input.CanRequestUserInput,
+		IsSubagent:                false,
+		SupportsImageInput:        input.SupportsImageInput,
+		ContextBudgetMaxTokens:    input.ContextBudgetMaxTokens,
+		ContextToolExchangePolicy: input.ContextToolExchangePolicy,
+		RuntimeFence:              fence,
+		RunContext:                ctx,
+		RuntimeGuard:              input.RuntimeGuard,
 	}
 }
 
@@ -2800,43 +2562,12 @@ func (p *SessionPool) toolHTTPHandler(h *runtimeHandle) http.Handler {
 	})
 }
 
-func (p *SessionPool) reconcileManagedACPConfig(ctx context.Context, botID string, profile acpprofile.Profile, setup acpprofile.AgentSetup, mode client.SetupMode, resolved client.ResolvedSessionContext, guard client.RuntimeSyncGuard) error {
-	if mode == client.SetupModeSelf {
-		return nil
-	}
-	runner, hasWorkspaceClient := p.runner.(workspaceClientRunner)
-	if !hasWorkspaceClient {
-		return nil
-	}
-	write := func(writeCtx context.Context) error {
-		return client.WriteManagedACPConfig(writeCtx, client.ManagedACPConfigRequest{
-			Profile:  profile,
-			Setup:    setup,
-			Mode:     mode,
-			Resolved: resolved,
-		}, func() (*bridge.Client, error) {
-			return runner.MCPClient(writeCtx, botID)
-		})
-	}
-	if guard == nil {
-		return write(ctx)
-	}
-	return guard(ctx, write)
-}
-
 func (p *SessionPool) runtimeSyncGuard(botID string, expectedBotEpoch int64) client.RuntimeSyncGuard {
 	if p == nil || p.stateStore == nil {
 		return nil
 	}
 	return func(ctx context.Context, fn func(context.Context) error) error {
-		err := p.stateStore.GuardRuntimeSync(ctx, botID, expectedBotEpoch, fn)
-		if errors.Is(err, ErrRuntimeConfigStale) {
-			return errors.Join(client.ErrRuntimeSyncGuardRejected, client.ErrRuntimeSyncGenerationStale, err)
-		}
-		if errors.Is(err, ErrRuntimeConfigResetInProgress) {
-			return errors.Join(client.ErrRuntimeSyncGuardRejected, client.ErrRuntimeSyncResetInProgress, err)
-		}
-		return err
+		return p.stateStore.GuardRuntimeSync(ctx, botID, expectedBotEpoch, fn)
 	}
 }
 
@@ -2845,8 +2576,8 @@ func runtimeOwnerMissingError() *feedback.Error {
 		feedback.CodeRuntimeOwnerMissing,
 		"missing_runtime_owner",
 		http.StatusConflict,
-		"chat.acp.runtimeOwnerMissing",
-		"ACP runtime owner is missing; recreate or reauthorize the ACP session",
+		"chat.externalAgent.runtimeOwnerMissing",
+		"External Agent runtime owner is missing; start a new External Agent session",
 		nil,
 	)
 }
@@ -2948,13 +2679,6 @@ func appendBoundedPromptEvents(events []event.StreamEvent, incoming ...event.Str
 
 const maxCollectedPromptToolEvents = 4096
 
-func managedEnvControls(profile acpprofile.Profile, mode client.SetupMode, backend client.WorkspaceBackend) (bool, []string) {
-	if profile.ID != acpprofile.AgentHermesID || mode == client.SetupModeSelf {
-		return false, nil
-	}
-	return backend == client.WorkspaceBackendContainer, client.HermesManagedUnsetEnvKeys()
-}
-
 func profileSupportsSetupMode(profile acpprofile.Profile, mode client.SetupMode) bool {
 	if len(profile.SetupModes) == 0 {
 		return true
@@ -2983,48 +2707,11 @@ func profileSupportsBackend(profile acpprofile.Profile, backend string) bool {
 	return false
 }
 
-func managedProcessEnv(profile acpprofile.Profile, values map[string]string, mode client.SetupMode) ([]string, error) {
-	switch profile.ID {
-	case acpprofile.AgentClaudeCodeID:
-		env := []string{
-			"ANTHROPIC_AUTH_TOKEN=",
-			"CLAUDE_CODE_USE_BEDROCK=",
-			"CLAUDE_CODE_USE_VERTEX=",
-			"CLAUDE_CODE_USE_FOUNDRY=",
-			// Claude Code does not think unless given a budget; this is the
-			// counterpart of Codex's model_reasoning_effort in config.toml so
-			// managed sessions stream reasoning by default.
-			"MAX_THINKING_TOKENS=16000",
-		}
-		switch mode {
-		case client.SetupModeAPIKey:
-			apiKey := strings.TrimSpace(values["api_key"])
-			if apiKey == "" {
-				return nil, fmt.Errorf("api_key required for %s api_key setup", profile.DisplayName)
-			}
-			env = append(env,
-				"CLAUDE_CODE_OAUTH_TOKEN=",
-				"ANTHROPIC_API_KEY="+apiKey,
-			)
-		case client.SetupModeOAuth:
-			token := strings.TrimSpace(values["oauth_token"])
-			if token == "" {
-				return nil, fmt.Errorf("oauth_token required for %s oauth setup", profile.DisplayName)
-			}
-			env = append(env,
-				"ANTHROPIC_API_KEY=",
-				"CLAUDE_CODE_OAUTH_TOKEN="+token,
-			)
-		default:
-			return nil, nil
-		}
-		if baseURL := strings.TrimSpace(values["base_url"]); baseURL != "" {
-			env = append(env, "ANTHROPIC_BASE_URL="+baseURL)
-		}
-		return env, nil
-	default:
-		return nil, nil
-	}
+// managedProcessEnv assembles per-agent process environment for managed
+// setups. No registered profile injects credentials through the environment,
+// so this is a declaration-driven no-op kept as the extension point.
+func managedProcessEnv(_ acpprofile.Profile, _ map[string]string, _ client.SetupMode) ([]string, error) {
+	return nil, nil
 }
 
 func metadataString(metadata map[string]any, key string) string {
@@ -3042,4 +2729,21 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// Caller holds h.op through both the live change and its durable write.
+func (p *SessionPool) persistModelPreference(ctx context.Context, h *runtimeHandle) {
+	writer, ok := p.store.(SessionPreferenceWriter)
+	if !ok {
+		return
+	}
+	h.state.Lock()
+	sessionID, sess := h.boundSession, h.session
+	h.state.Unlock()
+	if sessionID == "" || sess == nil {
+		return
+	}
+	if err := writer.SaveModelPreference(ctx, sessionID, strings.TrimSpace(sess.ModelState().CurrentModelID), strings.TrimSpace(sess.ReasoningState().CurrentEffort)); err != nil {
+		p.logger.Warn("persist ACP model preference", slog.String("session_id", sessionID), slog.Any("error", err))
+	}
 }

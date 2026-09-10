@@ -17,6 +17,10 @@ const (
 	UIMessageTool        UIMessageType = "tool"
 	UIMessageAttachments UIMessageType = "attachments"
 	UIMessageError       UIMessageType = "error"
+	// UIMessageNotice is an inline runtime degradation notice (tools
+	// unavailable, an interaction declined). Name carries the machine code,
+	// Content the human-readable text.
+	UIMessageNotice UIMessageType = "notice"
 )
 
 // UIAttachment is the normalized attachment shape used by the web frontend.
@@ -68,6 +72,11 @@ type UIMessage struct {
 	Background        *UIBackgroundTask    `json:"background_task,omitempty"`
 	ReasoningTiming   *UIReasoningTiming   `json:"reasoning_timing,omitempty"`
 	Code              string               `json:"code,omitempty"`
+	// Args are the machine-readable parameters of a notice block: the string
+	// values of the runtime_notice event metadata (dep_id and install_task_id
+	// for a workspace dependency notice, for instance). The client renders
+	// actions from them instead of parsing Content.
+	Args map[string]string `json:"args,omitempty"`
 } // @name conversation.UIMessage
 
 // UIReasoningTiming is the persisted server observation for one reasoning
@@ -169,6 +178,7 @@ type UIMessageStreamEvent struct {
 	UserInputID string
 	ShortID     int
 	Status      string
+	Code        string
 	Metadata    map[string]any
 }
 

@@ -88,10 +88,10 @@ func TestCreateNormalizesDescriptor(t *testing.T) {
 	service := NewService(slog.Default(), fake)
 
 	created, err := service.Create(context.Background(), testBotID, CreateRequest{
-		Name:    "  Primary Codex  ",
+		Name:    "  Primary Agent  ",
 		Runtime: " ACP ",
 		Metadata: map[string]any{
-			MetadataProviderKey: " CODEX ",
+			MetadataProviderKey: " ACP ",
 			"future":            "kept",
 		},
 	})
@@ -101,14 +101,14 @@ func TestCreateNormalizesDescriptor(t *testing.T) {
 	if created.ID != testAgentID {
 		t.Fatalf("Create() ID = %q, want %q", created.ID, testAgentID)
 	}
-	if fake.createParams.Name != "Primary Codex" || fake.createParams.Runtime != RuntimeACP {
+	if fake.createParams.Name != "Primary Agent" || fake.createParams.Runtime != RuntimeACP {
 		t.Fatalf("Create() params = %#v", fake.createParams)
 	}
 	var metadata map[string]any
 	if err := json.Unmarshal(fake.createParams.Metadata, &metadata); err != nil {
 		t.Fatalf("decode metadata: %v", err)
 	}
-	if metadata[MetadataProviderKey] != "codex" || metadata["future"] != "kept" {
+	if metadata[MetadataProviderKey] != "acp" || metadata["future"] != "kept" {
 		t.Fatalf("normalized metadata = %#v", metadata)
 	}
 }
@@ -120,10 +120,10 @@ func TestCreateRejectsUnsupportedDescriptors(t *testing.T) {
 		req  CreateRequest
 		want error
 	}{
-		{name: "native row", req: CreateRequest{Name: "Native", Runtime: "native", Metadata: map[string]any{"provider": "codex"}}, want: ErrInvalidRuntime},
+		{name: "native row", req: CreateRequest{Name: "Native", Runtime: "native", Metadata: map[string]any{"provider": "acp"}}, want: ErrInvalidRuntime},
 		{name: "unknown provider", req: CreateRequest{Name: "Other", Runtime: RuntimeACP, Metadata: map[string]any{"provider": "other"}}, want: ErrInvalidMetadata},
 		{name: "missing provider", req: CreateRequest{Name: "Other", Runtime: RuntimeACP, Metadata: map[string]any{}}, want: ErrInvalidMetadata},
-		{name: "blank name", req: CreateRequest{Name: " ", Runtime: RuntimeACP, Metadata: map[string]any{"provider": "codex"}}, want: ErrInvalidMetadata},
+		{name: "blank name", req: CreateRequest{Name: " ", Runtime: RuntimeACP, Metadata: map[string]any{"provider": "acp"}}, want: ErrInvalidMetadata},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -157,8 +157,15 @@ func TestUpdateAndDeleteProtectDefaultAgent(t *testing.T) {
 	if _, err := service.Update(context.Background(), testBotID, testAgentID, UpdateRequest{Enabled: &falseValue}); !errors.Is(err, ErrDefaultInUse) {
 		t.Fatalf("Update() error = %v, want %v", err, ErrDefaultInUse)
 	}
-	if err := service.Delete(context.Background(), testBotID, testAgentID); !errors.Is(err, ErrDefaultInUse) {
+	deleteHookCalled := false
+	if err := service.Delete(context.Background(), testBotID, testAgentID, func(BotAgent) error {
+		deleteHookCalled = true
+		return nil
+	}); !errors.Is(err, ErrDefaultInUse) {
 		t.Fatalf("Delete() error = %v, want %v", err, ErrDefaultInUse)
+	}
+	if deleteHookCalled {
+		t.Fatal("Delete() ran beforeCommit for a protected default Agent")
 	}
 }
 
@@ -177,7 +184,7 @@ func TestUpdateAndDeleteLockBotBeforeAgentMutation(t *testing.T) {
 	assertEvents(t, updateFake.events, []string{"transaction", "lock-bot", "update-agent"})
 
 	deleteFake := &fakeQueries{transactions: true}
-	if err := NewService(slog.Default(), deleteFake).Delete(context.Background(), testBotID, testAgentID); err != nil {
+	if err := NewService(slog.Default(), deleteFake).Delete(context.Background(), testBotID, testAgentID, nil); err != nil {
 		t.Fatalf("Delete() error = %v", err)
 	}
 	assertEvents(t, deleteFake.events, []string{"transaction", "lock-bot", "delete-agent"})
@@ -199,13 +206,28 @@ func TestDescriptorForUsesTemporaryMetadataProvider(t *testing.T) {
 	descriptor, err := DescriptorFor(BotAgent{
 		ID:       testAgentID,
 		Runtime:  " ACP ",
-		Metadata: map[string]any{"provider": " Claude-Code "},
+		Metadata: map[string]any{"provider": " ACP "},
 	})
 	if err != nil {
 		t.Fatalf("DescriptorFor() error = %v", err)
 	}
-	if descriptor.BotAgentID != testAgentID || descriptor.Runtime != RuntimeACP || descriptor.Provider != "claude-code" {
+	if descriptor.BotAgentID != testAgentID || descriptor.Runtime != RuntimeACP || descriptor.Provider != "acp" {
 		t.Fatalf("DescriptorFor() = %#v", descriptor)
+	}
+}
+
+func TestACPRejectsDirectRuntimeProviders(t *testing.T) {
+	// codex and claude-code moved to direct runtimes (migration 0144): the
+	// ACP shape must refuse them with a pointer to the new runtimes.
+	for _, provider := range []string{"codex", "Claude-Code"} {
+		_, err := DescriptorFor(BotAgent{
+			ID:       testAgentID,
+			Runtime:  "acp",
+			Metadata: map[string]any{"provider": provider},
+		})
+		if !errors.Is(err, ErrProviderDirectRuntime) {
+			t.Fatalf("DescriptorFor(%s) error = %v, want ErrProviderDirectRuntime", provider, err)
+		}
 	}
 }
 
@@ -217,7 +239,7 @@ func testRow(enabled bool) sqlc.BotAgent {
 		Name:      "Primary Codex",
 		Runtime:   RuntimeACP,
 		Enabled:   enabled,
-		Metadata:  []byte(`{"provider":"codex"}`),
+		Metadata:  []byte(`{"provider":"acp"}`),
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -225,4 +247,41 @@ func testRow(enabled bool) sqlc.BotAgent {
 
 func testUUID(value string) pgtype.UUID {
 	return pgtype.UUID{Bytes: uuid.MustParse(value), Valid: true}
+}
+
+func TestCreateHonorsEnabledFlag(t *testing.T) {
+	boolPtr := func(v bool) *bool { return &v }
+	tests := []struct {
+		name    string
+		enabled *bool
+		want    bool
+	}{
+		{name: "omitted defaults to enabled", enabled: nil, want: true},
+		{name: "explicit false creates disabled", enabled: boolPtr(false), want: false},
+		{name: "explicit true creates enabled", enabled: boolPtr(true), want: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			row := testRow(tc.want)
+			row.Runtime = RuntimeCodex
+			row.Metadata = []byte(`{"provider":"codex"}`)
+			fake := &fakeQueries{createRow: row}
+			service := NewService(slog.Default(), fake)
+
+			created, err := service.Create(context.Background(), testBotID, CreateRequest{
+				Name:    "Codex",
+				Runtime: RuntimeCodex,
+				Enabled: tc.enabled,
+			})
+			if err != nil {
+				t.Fatalf("Create() error = %v", err)
+			}
+			if fake.createParams.Enabled != tc.want {
+				t.Fatalf("Create() persisted enabled = %v, want %v", fake.createParams.Enabled, tc.want)
+			}
+			if created.Enabled != tc.want {
+				t.Fatalf("Create() returned enabled = %v, want %v", created.Enabled, tc.want)
+			}
+		})
+	}
 }

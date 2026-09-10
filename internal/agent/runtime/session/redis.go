@@ -119,7 +119,8 @@ if ref.bot_id ~= ARGV[1] or ref.session_id ~= ARGV[2] or
 end
 
 if run.status ~= 'admitting' and run.status ~= 'running' and
-   run.status ~= 'waiting_decision' and run.status ~= 'aborting' then
+   run.status ~= 'waiting_decision' and run.status ~= 'aborting' and
+   run.status ~= 'finishing' then
   return 0
 end
 
@@ -209,7 +210,7 @@ func (b *RedisBackend) Load(ctx context.Context, key Key) (Snapshot, bool, error
 		return Snapshot{}, false, err
 	}
 	var snapshot Snapshot
-	if err := json.Unmarshal(data, &snapshot); err != nil {
+	if err := unmarshalSnapshot(data, &snapshot); err != nil {
 		return Snapshot{}, false, err
 	}
 	return snapshot, true, nil
@@ -239,7 +240,7 @@ func (b *RedisBackend) Update(ctx context.Context, key Key, update SnapshotUpdat
 				changed = false
 				return nil
 			}
-			data, err := json.Marshal(next)
+			data, err := marshalSnapshot(next)
 			if err != nil {
 				return err
 			}
@@ -303,7 +304,7 @@ func (b *RedisBackend) UpdateActiveRun(ctx context.Context, key Key, runID, gene
 				changed = false
 				return nil
 			}
-			data, err := json.Marshal(next)
+			data, err := marshalSnapshot(next)
 			if err != nil {
 				return err
 			}
@@ -325,6 +326,17 @@ func (b *RedisBackend) UpdateActiveRun(ctx context.Context, key Key, runID, gene
 }
 
 func (b *RedisBackend) ReleaseRun(ctx context.Context, key Key, ref RunRef, update ActiveRunUpdate) (Snapshot, bool, error) {
+	return b.releaseRun(ctx, key, ref, update, true)
+}
+
+func (b *RedisBackend) ReconcileTerminalRun(ctx context.Context, key Key, ref RunRef, update ActiveRunUpdate) (Snapshot, bool, error) {
+	if ref.FencingToken <= 0 {
+		return Snapshot{}, false, ErrRunOwnershipLost
+	}
+	return b.releaseRun(ctx, key, ref, update, false)
+}
+
+func (b *RedisBackend) releaseRun(ctx context.Context, key Key, ref RunRef, update ActiveRunUpdate, requireLiveLease bool) (Snapshot, bool, error) {
 	if update == nil {
 		return Snapshot{}, false, errors.New("active run update is required")
 	}
@@ -354,11 +366,23 @@ func (b *RedisBackend) ReleaseRun(ctx context.Context, key Key, ref RunRef, upda
 			if err != nil {
 				return err
 			}
-			if !ok || !stateOK || current.CurrentRunView == nil {
+			if !stateOK || current.CurrentRunView == nil {
 				return ErrRunOwnershipLost
 			}
 			run := current.CurrentRunView
-			if !storedRef.identityMatches(ref) || run.RunID != ref.RunID || run.Generation != ref.Generation || run.OwnerID != ref.OwnerID || !isActiveRunStatus(run.Status) || run.OwnerLeaseExpiresAt == nil || !now.Before(*run.OwnerLeaseExpiresAt) {
+			if !ok {
+				// Expiry removes the routing lease, not the snapshot's receipt.
+				// No receipt means no proof: never infer a fence from run ID alone.
+				if requireLiveLease || run.FencingToken <= 0 || run.FencingToken != ref.FencingToken {
+					return ErrRunOwnershipLost
+				}
+				storedRef = RunRef{BotID: key.BotID, SessionID: key.SessionID, RunID: run.RunID, OwnerID: run.OwnerID, Generation: run.Generation, FencingToken: run.FencingToken}
+			}
+			identityMismatch := !storedRef.identityMatches(ref) || run.RunID != ref.RunID ||
+				run.Generation != ref.Generation || run.OwnerID != ref.OwnerID
+			leaseInvalid := !isActiveRunStatus(run.Status) || run.OwnerLeaseExpiresAt == nil || !now.Before(*run.OwnerLeaseExpiresAt)
+			fenceMismatch := !requireLiveLease && (storedRef.FencingToken != ref.FencingToken || (run.FencingToken > 0 && run.FencingToken != ref.FencingToken))
+			if identityMismatch || fenceMismatch || (requireLiveLease && leaseInvalid) {
 				return ErrRunOwnershipLost
 			}
 			next, apply, err := update(current, now)
@@ -370,7 +394,7 @@ func (b *RedisBackend) ReleaseRun(ctx context.Context, key Key, ref RunRef, upda
 				changed = false
 				return nil
 			}
-			data, err := json.Marshal(next)
+			data, err := marshalSnapshot(next)
 			if err != nil {
 				return err
 			}
@@ -448,7 +472,7 @@ func (b *RedisBackend) StartRun(ctx context.Context, key Key, ref RunRef, update
 				changed = false
 				return nil
 			}
-			stateData, err := json.Marshal(next)
+			stateData, err := marshalSnapshot(next)
 			if err != nil {
 				return err
 			}
@@ -694,7 +718,7 @@ func (b *RedisBackend) RenewLease(ctx context.Context, key Key, runID, ownerID, 
 			return ErrRunOwnershipLost
 		}
 		var snapshot Snapshot
-		if err := json.Unmarshal(stateData, &snapshot); err != nil {
+		if err := unmarshalSnapshot(stateData, &snapshot); err != nil {
 			return err
 		}
 		if snapshot.CurrentRunView == nil {
@@ -708,7 +732,7 @@ func (b *RedisBackend) RenewLease(ctx context.Context, key Key, runID, ownerID, 
 			return nil
 		}
 		run.OwnerLeaseExpiresAt = &expiresAt
-		nextStateData, err := json.Marshal(snapshot)
+		nextStateData, err := marshalSnapshot(snapshot)
 		if err != nil {
 			return err
 		}
@@ -999,7 +1023,7 @@ func loadRedisSnapshot(ctx context.Context, tx *redis.Tx, key string) (Snapshot,
 		return Snapshot{}, false, err
 	}
 	var snapshot Snapshot
-	if err := json.Unmarshal(data, &snapshot); err != nil {
+	if err := unmarshalSnapshot(data, &snapshot); err != nil {
 		return Snapshot{}, false, err
 	}
 	return snapshot, true, nil

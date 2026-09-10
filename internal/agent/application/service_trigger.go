@@ -4,15 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"strings"
 	"time"
 
-	contextfrag "github.com/felinics/memoh/internal/agent/context/fragment"
-	"github.com/felinics/memoh/internal/agent/event"
-	acpagent "github.com/felinics/memoh/internal/agent/runtime/acp"
-	acpclient "github.com/felinics/memoh/internal/agent/runtime/acp/client"
 	"github.com/felinics/memoh/internal/agent/runtime/native"
 	sessionruntime "github.com/felinics/memoh/internal/agent/runtime/session"
 	"github.com/felinics/memoh/internal/agent/sessionmode"
@@ -70,14 +65,15 @@ func (s *Service) TriggerSchedule(ctx context.Context, botID string, payload sch
 	defer func() { finish(triggeredRunTerminal{cause: err}) }()
 	ctx = runCtx
 
-	// Sessions with an ACP runtime execute through the session pool; the
-	// schedule's model/effort overrides ride the per-prompt input.
-	acpInfo, err := s.ACPSessionExecutionInfo(ctx, payload.SessionID)
+	// Runtime sessions (ACP, codex, claude-code) must never silently degrade
+	// to the built-in model: resolve the driver and run the scheduled turn
+	// through it.
+	dispatch, err := s.resolveRuntimeDispatch(ctx, ChatRequest{BotID: botID, ThreadID: payload.SessionID})
 	if err != nil {
 		return schedule.TriggerResult{}, err
 	}
-	if acpInfo.IsACP {
-		return s.triggerScheduleACP(ctx, botID, payload, token, admission.RunID, acpInfo)
+	if dispatch.kind == dispatchExternal {
+		return s.triggerScheduleRuntime(ctx, botID, payload, token, admission.RunID, dispatch.driver)
 	}
 
 	req := ChatRequest{
@@ -85,6 +81,7 @@ func (s *Service) TriggerSchedule(ctx context.Context, botID string, payload sch
 		ChatID:          botID,
 		ThreadID:        payload.SessionID,
 		RunID:           admission.RunID,
+		RunHandle:       admission.Handle,
 		Query:           payload.Command,
 		UserID:          payload.OwnerUserID,
 		Token:           token,
@@ -166,129 +163,6 @@ func (s *Service) runTriggeredNativeStream(
 	)
 }
 
-// triggerScheduleACP runs one schedule fire through the ACP session pool.
-// The run is non-interactive: no user input requests, no streaming consumer
-// — events are dropped and only the final result is reported back to the
-// schedule log. The round persists into the session history exactly like an
-// interactive ACP turn so the produced conversation can be opened and
-// continued.
-func (s *Service) triggerScheduleACP(ctx context.Context, botID string, payload schedule.TriggerPayload, token, runID string, info ACPSessionExecutionInfo) (schedule.TriggerResult, error) {
-	if s.acpPool == nil {
-		return schedule.TriggerResult{}, errors.New("ACP session pool is not configured")
-	}
-	runtimeOwner := strings.TrimSpace(info.RuntimeOwnerAccountID)
-	if runtimeOwner == "" {
-		return schedule.TriggerResult{}, errors.New("ACP runtime owner is missing; recreate the schedule or its session")
-	}
-	if err := s.requireACPRuntimeOwnerWorkspaceExec(ctx, botID, runtimeOwner); err != nil {
-		return schedule.TriggerResult{}, err
-	}
-
-	req := ChatRequest{
-		BotID:           botID,
-		ChatID:          botID,
-		ThreadID:        payload.SessionID,
-		RunID:           runID,
-		Query:           payload.Command,
-		RawQuery:        payload.Command,
-		UserID:          payload.OwnerUserID,
-		Token:           token,
-		Model:           payload.ACPModelID,
-		ReasoningEffort: payload.ReasoningEffort,
-		SessionType:     sessionmode.Schedule,
-	}
-
-	schedulePrompt := native.GenerateSchedulePrompt(native.Schedule{
-		ID:          payload.ID,
-		Name:        payload.Name,
-		Description: payload.Description,
-		Pattern:     payload.Pattern,
-		MaxCalls:    payload.MaxCalls,
-		Command:     payload.Command,
-	})
-	contextMarkdown := s.buildACPContextMarkdown(ctx, req, info.AgentID, info.ProjectPath)
-	contextLifecycle := contextfrag.NewLifecycleHolder()
-	contextLifecycle.SetManifest(contextfrag.BuildManifest(nil))
-	terminal := s.contextLifecycleTerminal(ctx, native.RunConfig{
-		RunID: runID,
-		Identity: native.SessionContext{
-			BotID:     botID,
-			SessionID: payload.SessionID,
-		},
-		ContextLifecycle: contextLifecycle,
-	})
-	var lifecycleCause error
-	defer func() { terminal(lifecycleCause) }()
-
-	// Fail closed like the chat path: proceeding after an uncertain eager
-	// insert would race the background cleanup goroutine against this round's
-	// own user message and could delete the canonical turn's user row.
-	var leadingErr error
-	req, _, leadingErr = s.persistACPLeadingUserMessage(context.WithoutCancel(ctx), req)
-	if leadingErr != nil {
-		return schedule.TriggerResult{}, fmt.Errorf("persist scheduled ACP user message: %w", leadingErr)
-	}
-
-	reasoningTiming := newReasoningTimingTracker(nil)
-	idleCtx, idleCancel := s.withStreamIdleTimeout(ctx, strings.TrimSpace(payload.ReasoningEffort))
-	defer idleCancel.Stop()
-	result, promptErr := s.acpPool.Prompt(idleCtx, acpagent.PromptInput{
-		BotID:             botID,
-		ChatID:            botID,
-		SessionID:         payload.SessionID,
-		RunID:             runID,
-		SessionType:       sessionmode.Schedule,
-		AgentID:           info.AgentID,
-		ProjectPath:       info.ProjectPath,
-		ModelID:           strings.TrimSpace(payload.ACPModelID),
-		ReasoningEffort:   strings.TrimSpace(payload.ReasoningEffort),
-		Prompt:            schedulePrompt,
-		ChannelIdentityID: strings.TrimSpace(payload.OwnerUserID),
-		SessionToken:      token,
-		// Nobody is on the other end of a scheduled run.
-		CanRequestUserInput:   false,
-		SupportsImageInput:    false,
-		ToolOutputLimit:       s.toolOutputLimit(),
-		ContextURI:            acpContextURI,
-		ContextMarkdown:       contextMarkdown,
-		RuntimeOwnerAccountID: runtimeOwner,
-		Sink: acpclient.EventSinkFunc(func(ev event.StreamEvent) {
-			idleCancel.Reset()
-			if ev.Type == native.EventToolCallStart {
-				idleCancel.RecordToolCall()
-			}
-			reasoningTiming.observe(ev)
-		}),
-	})
-	lifecycleCause = promptErr
-	if promptErr != nil {
-		s.cancelPendingACPApprovals(context.WithoutCancel(ctx), req, "tool approval cancelled: the scheduled run ended before a decision arrived")
-		failedResult, _ := acpFailureResult(ensureACPPromptOutput(result), promptErr)
-		if err := s.persistACPRound(context.WithoutCancel(ctx), req, info.AgentID, info.ProjectPath, failedResult, promptErr, false, contextLifecycle, takeTerminalReasoningTiming(reasoningTiming, native.EventAgentAbort)); err != nil {
-			lifecycleCause = runtimeHistoryError(err)
-			s.logger.Error("ACP schedule failure persist failed", slog.Any("error", err), slog.String("session_id", payload.SessionID))
-		}
-		return schedule.TriggerResult{}, promptErr
-	}
-
-	result = ensureACPPromptOutput(result)
-	if err := s.persistACPRound(context.WithoutCancel(ctx), req, info.AgentID, info.ProjectPath, result, nil, true, contextLifecycle, takeTerminalReasoningTiming(reasoningTiming, native.EventAgentEnd)); err != nil {
-		lifecycleCause = runtimeHistoryError(err)
-		s.logger.Error("ACP schedule persist failed", slog.Any("error", err), slog.String("session_id", payload.SessionID))
-		return schedule.TriggerResult{}, err
-	}
-
-	var usageJSON []byte
-	if result.Usage != nil {
-		usageJSON, _ = json.Marshal(result.Usage)
-	}
-	return schedule.TriggerResult{
-		Status:     "ok",
-		Text:       strings.TrimSpace(result.Text),
-		UsageBytes: usageJSON,
-	}, nil
-}
-
 // consumeTriggeredStream drains a triggered (non-interactive) run's event
 // stream. Every event is published to the session runtime so subscribers
 // watch the run live; persistence follows the same discipline as the WS loop
@@ -316,14 +190,19 @@ func (s *Service) consumeTriggeredStreamWithIdle(ctx context.Context, events <-c
 	}
 
 	var (
-		lastSnapshot     terminalSnapshot
-		hasSnapshot      bool
-		hasVisibleOutput bool
-		stored           bool
-		terminalAborted  bool
-		streamErr        error
+		lastSnapshot       terminalSnapshot
+		hasSnapshot        bool
+		terminalSeen       bool
+		hasVisibleOutput   bool
+		stored             bool
+		terminalAborted    bool
+		terminalPersistErr error
+		streamErr          error
 	)
 	for event := range events {
+		if event.IsTerminal() {
+			terminalSeen = true
+		}
 		if idle != nil {
 			idle.Reset()
 			if event.Type == native.EventToolCallStart {
@@ -355,7 +234,7 @@ func (s *Service) consumeTriggeredStreamWithIdle(ctx context.Context, events <-c
 		if hasVisibleAgentStreamOutput(event) {
 			hasVisibleOutput = true
 		}
-		if publishEvent != nil {
+		if publishEvent != nil && !event.IsTerminal() {
 			if publishErr := publishEvent(ctx, publicAgentStreamEvent(event)); publishErr != nil {
 				// A refused projection write (fence rejection, ownership
 				// handoff) means this process may no longer own the run, and
@@ -388,8 +267,9 @@ func (s *Service) consumeTriggeredStreamWithIdle(ctx context.Context, events <-c
 			if !stored && !runOwnershipLost(ctx) {
 				if stepCommitter != nil {
 					if storeErr := stepCommitter.finish(ctx, extractInputTokensFromUsage(snap.usage)); storeErr != nil {
+						terminalPersistErr = runtimeHistoryError(storeErr)
 						if streamErr == nil {
-							streamErr = storeErr
+							streamErr = terminalPersistErr
 						}
 						s.logger.Error("triggered run step finalization failed", slog.Any("error", storeErr))
 					} else {
@@ -397,14 +277,45 @@ func (s *Service) consumeTriggeredStreamWithIdle(ctx context.Context, events <-c
 					}
 				} else {
 					if storeErr := s.persistTerminalSnapshot(context.WithoutCancel(ctx), req, rc, snap); storeErr != nil {
+						terminalPersistErr = runtimeHistoryError(storeErr)
 						if streamErr == nil {
-							streamErr = storeErr
+							streamErr = terminalPersistErr
 						}
 						s.logger.Error("triggered run terminal persist failed", slog.Any("error", storeErr))
 					} else {
 						stored = true
 					}
 				}
+			}
+		}
+		if event.IsTerminal() && !stored && !runOwnershipLost(ctx) && terminalPersistErr == nil {
+			switch {
+			case !hasVisibleOutput:
+				// A terminal event before visible assistant output has no output
+				// row to persist; the admitted user message is already durable.
+				stored = true
+			case stepCommitter != nil:
+				if storeErr := stepCommitter.finish(ctx, rc.estimatedTokens); storeErr != nil {
+					terminalPersistErr = runtimeHistoryError(storeErr)
+				} else {
+					stored = true
+				}
+			default:
+				terminalPersistErr = runtimeHistoryError(errors.New("agent terminal event has no persistable snapshot"))
+			}
+			if terminalPersistErr != nil && streamErr == nil {
+				streamErr = terminalPersistErr
+			}
+		}
+		if event.IsTerminal() && terminalPersistErr == nil && !runOwnershipLost(ctx) && publishEvent != nil {
+			// The durable history write is the terminal proposal barrier. A crash
+			// after this publication can now be completed by the session reaper;
+			// publishing before it would make an uncommitted answer look complete.
+			if publishErr := publishEvent(context.WithoutCancel(ctx), publicAgentStreamEvent(event)); publishErr != nil {
+				if streamErr == nil {
+					streamErr = publishErr
+				}
+				break
 			}
 		}
 	}
@@ -430,6 +341,8 @@ func (s *Service) consumeTriggeredStreamWithIdle(ctx context.Context, events <-c
 		// The reaper names this run's outcome; a superseded owner must not
 		// report a result for it (SR-DUR-002).
 		return schedule.TriggerResult{}, sessionruntime.ErrRunOwnershipLost
+	case terminalPersistErr != nil:
+		return schedule.TriggerResult{}, terminalPersistErr
 	case terminalAborted:
 		// The transcript already persisted above; report the abort as the
 		// outcome so the schedule log records the stop, not a success.
@@ -441,7 +354,7 @@ func (s *Service) consumeTriggeredStreamWithIdle(ctx context.Context, events <-c
 			}
 		}
 		return schedule.TriggerResult{}, streamErr
-	case !hasSnapshot:
+	case !terminalSeen:
 		return schedule.TriggerResult{}, errors.New("schedule run ended without a terminal event")
 	}
 

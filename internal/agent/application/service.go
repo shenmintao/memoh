@@ -30,6 +30,7 @@ import (
 	historyfrag "github.com/felinics/memoh/internal/agent/context/history"
 	toolapproval "github.com/felinics/memoh/internal/agent/decision/approval"
 	userinput "github.com/felinics/memoh/internal/agent/decision/input"
+	"github.com/felinics/memoh/internal/agent/runtime/external"
 	"github.com/felinics/memoh/internal/agent/runtime/native"
 	sessionruntime "github.com/felinics/memoh/internal/agent/runtime/session"
 	"github.com/felinics/memoh/internal/agent/sessionmode"
@@ -103,36 +104,37 @@ type compactionRunner interface {
 
 // Service orchestrates chat with the internal agent.
 type Service struct {
-	agent                  *native.Agent
-	modelsService          *models.Service
-	queries                dbstore.Queries
-	memoryRegistry         *memprovider.Registry
-	messageService         messagepkg.Service
-	settingsService        *settings.Service
-	accountService         *accounts.Service
-	sessionService         SessionService
-	acpPool                acpPrompter
-	compactionService      compactionRunner
-	eventPublisher         messageevent.Publisher
-	skillLoader            SkillLoader
-	assetLoader            gatewayAssetLoader
-	platformIdentities     PlatformIdentitySource
-	botPermissions         botPermissionChecker
-	workspaceTargets       workspaceTargetResolver
-	workdirs               sessionWorkdirResolver
-	pipeline               *timeline.Pipeline
-	streamHTTPClient       *http.Client
-	nonStreamingHTTPClient *http.Client
-	streamIdleTimeout      time.Duration
-	streamIdleTimeoutMax   time.Duration
-	bgManager              *background.Manager
-	toolApproval           *toolapproval.Service
-	userInput              userInputService
-	hookService            *hooks.Service
-	memoryContextMu        sync.Mutex
-	memoryContextCache     *memprovider.MemoryContextCache
-	acpPromptMu            sync.Mutex
-	acpPromptHubs          map[string]*acpActivePromptHub
+	agent                   *native.Agent
+	modelsService           *models.Service
+	queries                 dbstore.Queries
+	memoryRegistry          *memprovider.Registry
+	messageService          messagepkg.Service
+	settingsService         *settings.Service
+	accountService          *accounts.Service
+	sessionService          SessionService
+	acpPool                 acpPrompter
+	externalDrivers         map[string]external.Driver
+	compactionService       compactionRunner
+	eventPublisher          messageevent.Publisher
+	skillLoader             SkillLoader
+	assetLoader             gatewayAssetLoader
+	platformIdentities      PlatformIdentitySource
+	botPermissions          botPermissionChecker
+	workspaceTargets        workspaceTargetResolver
+	workdirs                sessionWorkdirResolver
+	pipeline                *timeline.Pipeline
+	streamHTTPClient        *http.Client
+	nonStreamingHTTPClient  *http.Client
+	compactionHTTPClient    *http.Client
+	streamIdleTimeout       time.Duration
+	streamIdleTimeoutMax    time.Duration
+	bgManager               *background.Manager
+	toolApproval            *toolapproval.Service
+	userInput               userInputService
+	hookService             *hooks.Service
+	memoryContextMu         sync.Mutex
+	memoryContextCache      *memprovider.MemoryContextCache
+	externalAgentPromptHubs sync.Map
 	// continueUserInputFn overrides the application resume after a user input
 	// response; nil means storeUserInputResultAndContinue. Test seam.
 	continueUserInputFn               func(ctx context.Context, req userinput.Request, input UserInputResponseInput, result sdk.ToolResultPart, eventCh chan<- WSStreamEvent) error
@@ -141,6 +143,7 @@ type Service struct {
 	timeout                           time.Duration
 	memorySearchTimeout               time.Duration
 	contextAbsoluteCapTokens          int
+	syncCompactionMode                string
 	clockLocation                     *time.Location
 	logger                            *slog.Logger
 	allowedTeam                       string
@@ -153,6 +156,9 @@ type Service struct {
 	contextLifecycleCandidates        map[contextLifecycleCandidateKey]contextLifecycleCandidate
 	publishTurnEvent                  func(context.Context, sessionruntime.RunHandle, native.StreamEvent) error
 	turnHooks                         *turnRuntimeHooks
+	sessionManager                    *sessionruntime.Manager
+	// followUpStarts holds one in-flight follow-up starter per session key.
+	followUpStarts sync.Map
 }
 
 // NewService creates an application service backed by the native agent.
@@ -196,8 +202,17 @@ func NewService(
 		Transport: nonStreamingTransport,
 		Timeout:   10 * time.Minute,
 	}
+	// The summarizer sends one large cold prompt whose first byte routinely
+	// takes 60-93s upstream; the interactive 30s header deadline would kill
+	// every automatic pass while manual /compact (SDK default client) works.
+	compactionTransport := streamTransport.Clone()
+	compactionTransport.ResponseHeaderTimeout = 3 * time.Minute
+	compactionHTTPClient := &http.Client{
+		Transport: compactionTransport,
+		Timeout:   10 * time.Minute,
+	}
 
-	return &Service{
+	service := &Service{
 		agent:                  a,
 		modelsService:          modelsService,
 		queries:                queries,
@@ -207,11 +222,13 @@ func NewService(
 		accountService:         accountService,
 		streamHTTPClient:       streamHTTPClient,
 		nonStreamingHTTPClient: nonStreamingHTTPClient,
+		compactionHTTPClient:   compactionHTTPClient,
 		timeout:                timeout,
 		memorySearchTimeout:    defaultMemorySearchTimeout,
 		clockLocation:          clockLocation,
 		logger:                 log.With(slog.String("service", "agent/application")),
 	}
+	return service
 }
 
 // SetContextAbsoluteMaxTokens sets the server-wide context admission cap
@@ -242,6 +259,32 @@ func (s *Service) effectiveContextTokenBudget(chatModel models.GetResponse) int 
 		return capTokens
 	}
 	return min(budget, capTokens)
+}
+
+// Pre-turn synchronous compaction backstop rollout modes (CM-CMP-003). The
+// wire values match config.SyncCompactionMode*; the application keeps its own
+// constants so the domain layer does not import the config package.
+const (
+	syncCompactionModeActive = "active"
+	syncCompactionModeShadow = "shadow"
+	syncCompactionModeOff    = "off"
+)
+
+// SetSyncCompactionMode sets the rollout mode for the pre-turn synchronous
+// compaction backstop on the discuss and pipeline-chat paths.
+func (s *Service) SetSyncCompactionMode(mode string) {
+	s.syncCompactionMode = mode
+}
+
+// effectiveSyncCompactionMode normalizes the configured mode; anything
+// unrecognized (including unset) observes in shadow rather than enforcing.
+func (s *Service) effectiveSyncCompactionMode() string {
+	switch s.syncCompactionMode {
+	case syncCompactionModeActive, syncCompactionModeOff:
+		return s.syncCompactionMode
+	default:
+		return syncCompactionModeShadow
+	}
 }
 
 // SetMemoryRegistry sets the provider registry for memory operations.
@@ -425,24 +468,43 @@ func (s *Service) resolveWithHTTPClient(ctx context.Context, req ChatRequest, mo
 	if err := s.rejectRequestedSkillsIfUnsupportedContext(ctx, req); err != nil {
 		return resolvedContext{}, req, err
 	}
-	req = s.applySubagentThreadDefaults(ctx, req)
+	// Session model preference (issue #879 spec v2): loaded once per turn,
+	// BEFORE the subagent pin below — the pin is only a session's initial
+	// default and must not refill the request over a remembered pair.
+	// requestCarriesPair is captured before that mutation so the write-back
+	// gate sees the request as it actually arrived: the web composer omits
+	// model/effort when the pair is default-sourced, and channel requests
+	// structurally never carry them (only the local REST handler ever fills
+	// the metadata keys), so "carries" == "explicitly chosen or remembered".
+	// Schedule-triggered turns skip the memory level entirely: their model
+	// comes from the schedule payload or the bot default, and a pair
+	// remembered from a web continuation must not hijack them.
+	requestCarriesPair := strings.TrimSpace(req.Model) != "" || strings.TrimSpace(req.ReasoningEffort) != ""
+	sessionPrefModelID, sessionPrefEffort := "", ""
+	pairMemoryApplies := !strings.EqualFold(strings.TrimSpace(req.SessionType), sessionmode.Schedule)
+	if pairMemoryApplies {
+		sessionPrefModelID, sessionPrefEffort = s.sessionModelPreference(ctx, req.ThreadID)
+	}
+	req = s.applySubagentThreadDefaults(ctx, req, sessionPrefModelID != "")
 
 	runCfg, chatModel, provider, err := s.buildBaseRunConfig(ctx, baseRunConfigParams{
-		BotID:             req.BotID,
-		ChatID:            req.ChatID,
-		SessionID:         req.ThreadID,
-		RouteID:           req.RouteID,
-		UserID:            req.UserID,
-		ChannelIdentityID: req.SourceChannelIdentityID,
-		CurrentPlatform:   req.CurrentChannel,
-		ReplyTarget:       req.ReplyTarget,
-		ConversationType:  req.ConversationType,
-		SessionToken:      req.ChatToken,
-		SessionType:       req.SessionType,
-		Model:             req.Model,
-		Provider:          req.Provider,
-		ReasoningEffort:   req.ReasoningEffort,
-		HTTPClient:        modelHTTPClient,
+		BotID:              req.BotID,
+		ChatID:             req.ChatID,
+		SessionID:          req.ThreadID,
+		RouteID:            req.RouteID,
+		UserID:             req.UserID,
+		ChannelIdentityID:  req.SourceChannelIdentityID,
+		CurrentPlatform:    req.CurrentChannel,
+		ReplyTarget:        req.ReplyTarget,
+		ConversationType:   req.ConversationType,
+		SessionToken:       req.ChatToken,
+		SessionType:        req.SessionType,
+		SessionPrefModelID: sessionPrefModelID,
+		SessionPrefEffort:  sessionPrefEffort,
+		Model:              req.Model,
+		Provider:           req.Provider,
+		ReasoningEffort:    req.ReasoningEffort,
+		HTTPClient:         modelHTTPClient,
 	})
 	if err != nil {
 		s.logger.Error("resolve: buildBaseRunConfig failed",
@@ -451,6 +513,14 @@ func (s *Service) resolveWithHTTPClient(ctx context.Context, req ChatRequest, mo
 		)
 		return resolvedContext{}, req, err
 	}
+
+	// Persist explicit selections before generation and advance the revision
+	// even for matching values. Schedule payloads describe the scheduled turn,
+	// not a session preference, and must never enter this write path.
+	s.writeBackSessionModelPreference(ctx, req.ThreadID, requestCarriesPair && pairMemoryApplies, chatModel, runCfg.ReasoningConfig)
+	if req.OnModelPreferenceSettled != nil {
+		req.OnModelPreferenceSettled()
+	}
 	if strings.EqualFold(strings.TrimSpace(req.SessionType), sessionpkg.TypeSubagent) {
 		// A direct turn on a subagent thread runs as the subagent, not as a
 		// chat turn that happens to share its history: same restricted tool
@@ -458,7 +528,11 @@ func (s *Service) resolveWithHTTPClient(ctx context.Context, req ChatRequest, mo
 		runCfg.Identity.IsSubagent = true
 	}
 	runCfg.RunID = runIDForChatRequest(req.RunID)
-	memoryMsg := s.loadMemoryContextMessage(ctx, req)
+	memoryContext := s.loadMemoryContext(ctx, req)
+	if memoryContext.Trace != nil && runCfg.ContextLifecycle != nil {
+		runCfg.ContextLifecycle.SetMemoryRecall(*memoryContext.Trace)
+	}
+	memoryMsg := memoryContext.Message
 	reqMessages := pruneMessagesForGateway(nonNilModelMessages(req.Messages))
 	if memoryMsg != nil {
 		pruned, _ := pruneMessageForGateway(*memoryMsg)
@@ -474,7 +548,7 @@ func (s *Service) resolveWithHTTPClient(ctx context.Context, req ChatRequest, mo
 		strings.TrimSpace(req.HistoryCutoffBeforeMessageID) == "" &&
 		len(req.RequestedSkills) == 0
 	if usePipeline {
-		if _, loaded := s.pipeline.GetIC(strings.TrimSpace(req.ThreadID)); !loaded {
+		if !s.pipeline.HasSession(strings.TrimSpace(req.ThreadID)) {
 			usePipeline = false
 		}
 	}
@@ -489,7 +563,40 @@ func (s *Service) resolveWithHTTPClient(ctx context.Context, req ChatRequest, mo
 	var compactableTokensKnown bool
 	var currentMessageIndex *int
 	if usePipeline {
-		messages = s.buildMessagesFromPipeline(ctx, req, contextTokenBudget)
+		messages, compactableTokens = s.buildMessagesFromPipeline(ctx, req, contextTokenBudget)
+		compactableTokensKnown = true
+		// Pre-turn synchronous compaction backstop (CM-CMP-001), gated per
+		// CM-CMP-003. Mirrors the legacy path below: only a pass that
+		// actually produced a summary triggers recomposition; a noop keeps
+		// this turn's (already trimmed) context untouched.
+		if mode := s.effectiveSyncCompactionMode(); mode != syncCompactionModeOff && syncCompactionShouldRun(compactableTokens, contextTokenBudget) {
+			threshold := hardCompactionThreshold(contextTokenBudget)
+			if mode == syncCompactionModeShadow {
+				s.logger.Info("sync_compaction_backstop",
+					slog.String("path", "pipeline_chat"),
+					slog.String("mode", "shadow"),
+					slog.Bool("would_fire", true),
+					slog.String("bot_id", req.BotID),
+					slog.String("session_id", req.ThreadID),
+					slog.Int("pressure_tokens", compactableTokens),
+					slog.Int("threshold_tokens", threshold))
+			} else {
+				start := time.Now()
+				res := s.runCompactionSync(ctx, req, compactableTokens, contextTokenBudget, chatModel.ID)
+				s.logger.Info("sync_compaction_backstop",
+					slog.String("path", "pipeline_chat"),
+					slog.String("mode", "active"),
+					slog.String("status", res.Status),
+					slog.Int64("duration_ms", time.Since(start).Milliseconds()),
+					slog.String("bot_id", req.BotID),
+					slog.String("session_id", req.ThreadID),
+					slog.Int("pressure_tokens", compactableTokens),
+					slog.Int("threshold_tokens", threshold))
+				if res.Status == compaction.StatusOK {
+					messages, compactableTokens = s.buildMessagesFromPipeline(ctx, req, contextTokenBudget)
+				}
+			}
+		}
 		currentMessageIndex = latestModelUserMessageIndex(messages)
 	} else {
 		historyFallback := historyScopeFallbackFromChatRequest(req)
@@ -704,13 +811,17 @@ func (s *Service) Chat(ctx context.Context, req ChatRequest) (ChatResponse, erro
 	if err := s.rejectRequestedSkillsIfUnsupportedContext(ctx, req); err != nil {
 		return ChatResponse{}, err
 	}
-	if isACP, err := s.isACPAgentSession(ctx, req); err != nil {
+	dispatch, err := s.resolveRuntimeDispatch(ctx, req)
+	if err != nil {
 		return ChatResponse{}, err
-	} else if isACP {
-		if err := rejectACPWorkspaceTarget(req); err != nil {
-			return ChatResponse{}, err
-		}
-	} else {
+	}
+	switch dispatch.kind {
+	case dispatchExternal:
+		// Chat surfaces stream; the synchronous path never carried runtime
+		// turns and silently running the native model here would be wrong
+		// (the pre-unification ACP path used to degrade exactly that way).
+		return ChatResponse{}, errors.New("runtime sessions support only streaming chat surfaces")
+	default:
 		var err error
 		ctx, req, err = s.prepareWorkspaceRequest(ctx, req)
 		if err != nil {
@@ -721,7 +832,6 @@ func (s *Service) Chat(ctx context.Context, req ChatRequest) (ChatResponse, erro
 	if req.RawQuery == "" {
 		req.RawQuery = strings.TrimSpace(req.Query)
 	}
-	var err error
 	if !req.UserMessagePersisted {
 		req, err = s.applyUserMessageHook(ctx, req)
 		if err != nil {
@@ -738,9 +848,11 @@ func (s *Service) Chat(ctx context.Context, req ChatRequest) (ChatResponse, erro
 	go s.maybeGenerateSessionTitle(context.WithoutCancel(ctx), req, req.RawQuery)
 
 	cfg := rc.runConfig
+	cfg.StepIndexOffset = req.StepIndexOffset
 	stepCommitter := s.newAgentStepCommitter(ctx, req, rc)
 	if stepCommitter != nil {
 		cfg.OnStepCommitted = stepCommitter.commit
+		stepCommitter.bindContinuation(&cfg)
 	}
 	cfg = s.prepareRunConfig(ctx, cfg)
 	terminal := s.contextLifecycleTerminal(ctx, cfg)
@@ -806,10 +918,15 @@ type baseRunConfigParams struct {
 	ConversationType  string
 	SessionToken      string //nolint:gosec // session credential material, not a hardcoded secret
 	SessionType       string
-	Model             string
-	Provider          string
-	ReasoningEffort   string // caller-provided override (empty = use bot default)
-	HTTPClient        *http.Client
+	// SessionPrefModelID/SessionPrefEffort carry the session's persisted
+	// (model, effort) pair (issue #879), loaded by the caller before the
+	// subagent pin may fill the request. Empty = no memory.
+	SessionPrefModelID string
+	SessionPrefEffort  string
+	Model              string
+	Provider           string
+	ReasoningEffort    string // caller-provided override (empty = use bot default)
+	HTTPClient         *http.Client
 }
 
 // buildBaseRunConfig creates a RunConfig with model, credentials, skills,
@@ -830,7 +947,7 @@ func (s *Service) buildBaseRunConfig(ctx context.Context, p baseRunConfigParams)
 
 	req := buildModelSelectionRequest(p, chatID)
 
-	chatModel, provider, err := s.selectChatModel(ctx, req, botSettings)
+	chatModel, provider, err := s.selectChatModel(ctx, req, botSettings, p.SessionPrefModelID)
 	if err != nil {
 		return native.RunConfig{}, models.GetResponse{}, sqlc.Provider{}, err
 	}
@@ -848,7 +965,7 @@ func (s *Service) buildBaseRunConfig(ctx context.Context, p baseRunConfigParams)
 		providers.ProviderConfigString(provider, models.ChatCompletionsCompatConfigKey),
 	)
 
-	reasoningConfig := resolveReasoningConfig(chatModel, botSettings, p.ReasoningEffort, provider.ClientType)
+	reasoningConfig := resolveRunReasoningConfig(chatModel, botSettings, p, provider.ClientType)
 
 	modelHTTPClient := p.HTTPClient
 	if modelHTTPClient == nil {
@@ -970,16 +1087,45 @@ func supportsFileInputForModel(m models.GetResponse) bool {
 	return m.HasCompatibility(models.CompatFileInput)
 }
 
+// resolveRunReasoningConfig keeps remembered effort attached to its model UUID.
+// An explicit switch starts from the new model default; a slug resolving to
+// the same UUID is not a switch and may retain the remembered effort.
+func resolveRunReasoningConfig(chatModel models.GetResponse, botSettings settings.Settings, p baseRunConfigParams, clientType string) *models.ReasoningConfig {
+	sessionEffort := p.SessionPrefEffort
+	if !strings.EqualFold(strings.TrimSpace(chatModel.ID), strings.TrimSpace(p.SessionPrefModelID)) {
+		sessionEffort = ""
+		previousModel := p.SessionPrefModelID
+		if previousModel == "" {
+			previousModel = botSettings.ChatModelID
+		}
+		if strings.TrimSpace(p.Model) != "" && !strings.EqualFold(strings.TrimSpace(chatModel.ID), strings.TrimSpace(previousModel)) {
+			botSettings.ReasoningEffort = ""
+		}
+	}
+	return resolveReasoningConfig(chatModel, botSettings, p.ReasoningEffort, sessionEffort, clientType)
+}
+
 // resolveReasoningConfig makes the single reasoning decision for a call. The
 // decision itself lives in internal/reasoning, which also answers what a picker
 // may offer — the two share internals so the options a user sees and the value a
 // call sends cannot disagree.
-func resolveReasoningConfig(chatModel models.GetResponse, botSettings settings.Settings, requestedEffort, clientType string) *models.ReasoningConfig {
+//
+// sessionEffort is the session's remembered tier (issue #879). It sits between
+// the per-message request and the bot's stored value, implemented by shadowing
+// `stored`: identical semantics to a dedicated level, and — critically — it is
+// NOT passed as `requested`, because RunConfig.ReasoningRequestedEffort travels
+// to spawned subagents as "the user's explicit pick this turn" and memory must
+// not leak into that channel.
+func resolveReasoningConfig(chatModel models.GetResponse, botSettings settings.Settings, requestedEffort, sessionEffort, clientType string) *models.ReasoningConfig {
+	stored := botSettings.ReasoningEffort
+	if e := strings.TrimSpace(sessionEffort); e != "" {
+		stored = e
+	}
 	return reasoning.ResolveConfig(
 		chatModel.ResolveThinkingMode(),
 		chatModel.Config.ReasoningEfforts,
 		chatModel.ReasoningOptions(clientType),
-		botSettings.ReasoningEffort,
+		stored,
 		requestedEffort,
 		clientType,
 	)
@@ -1221,7 +1367,9 @@ func (s *Service) ResolveRunConfig(ctx context.Context, botID, sessionID, channe
 	}
 
 	sessionType, runtimeType := s.resolveRunConfigSessionDescriptor(ctx, sessionID)
-	if runtimeType == sessionpkg.RuntimeACPAgent {
+	if runtimeType == sessionpkg.RuntimeACPAgent || sessionpkg.IsDirectRuntimeType(runtimeType) {
+		// Agent runtimes (ACP and the direct external agents) resolve their
+		// own model and prompt; only the identity travels in the run config.
 		cfg := native.RunConfig{
 			SessionType: sessionType,
 			Identity: native.SessionContext{
@@ -1240,15 +1388,24 @@ func (s *Service) ResolveRunConfig(ctx context.Context, botID, sessionID, channe
 			RuntimeType: runtimeType,
 		}, nil
 	}
+	// Resumed turns (ask_user answers, tool approvals, discuss) carry no
+	// request model — the session's remembered pair is their model source
+	// (issue #879), with the same schedule exclusion as resolve().
+	sessionPrefModelID, sessionPrefEffort := "", ""
+	if !strings.EqualFold(strings.TrimSpace(sessionType), sessionmode.Schedule) {
+		sessionPrefModelID, sessionPrefEffort = s.sessionModelPreference(ctx, sessionID)
+	}
 	cfg, chatModel, _, err := s.buildBaseRunConfig(ctx, baseRunConfigParams{
-		BotID:             botID,
-		SessionID:         sessionID,
-		ChannelIdentityID: channelIdentityID,
-		CurrentPlatform:   currentPlatform,
-		ReplyTarget:       replyTarget,
-		ConversationType:  conversationType,
-		SessionToken:      chatToken,
-		SessionType:       sessionType,
+		BotID:              botID,
+		SessionID:          sessionID,
+		ChannelIdentityID:  channelIdentityID,
+		CurrentPlatform:    currentPlatform,
+		ReplyTarget:        replyTarget,
+		ConversationType:   conversationType,
+		SessionToken:       chatToken,
+		SessionType:        sessionType,
+		SessionPrefModelID: sessionPrefModelID,
+		SessionPrefEffort:  sessionPrefEffort,
 	})
 	if err != nil {
 		return ResolveRunConfigResult{}, err

@@ -242,8 +242,15 @@ func mapClientError(err error) error {
 		return nil
 	}
 	switch status.Code(err) {
+	case codes.Aborted:
+		return turn.ErrSessionBusy
 	case codes.AlreadyExists:
 		return turn.ErrDuplicateTurn
+	case codes.ResourceExhausted:
+		if status.Convert(err).Message() == turnDeferredStatusMessage {
+			return turn.ErrTurnDeferred
+		}
+		return err
 	case codes.PermissionDenied:
 		return turn.ErrTeamNotServed
 	case codes.Canceled:
@@ -258,4 +265,20 @@ func mapClientError(err error) error {
 	default:
 		return err
 	}
+}
+
+func (c *Client) StopTurn(ctx context.Context, cmd turn.StopCommand) (bool, error) {
+	data, err := json.Marshal(cmd)
+	if err != nil {
+		return false, err
+	}
+	resp, err := c.client.StopTurn(ctx, &turnpb.JsonRequest{Json: data})
+	if err != nil {
+		return false, mapClientError(err)
+	}
+	var stopped bool
+	if err := json.Unmarshal(resp.GetJson(), &stopped); err != nil {
+		return false, err
+	}
+	return stopped, nil
 }

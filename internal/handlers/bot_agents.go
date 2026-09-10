@@ -9,6 +9,7 @@ import (
 	"github.com/labstack/echo/v4"
 
 	"github.com/felinics/memoh/internal/accounts"
+	"github.com/felinics/memoh/internal/agent/runtime/external"
 	"github.com/felinics/memoh/internal/apperror"
 	"github.com/felinics/memoh/internal/botagents"
 	"github.com/felinics/memoh/internal/bots"
@@ -19,14 +20,16 @@ type BotAgentsHandler struct {
 	botService     *bots.Service
 	accountService *accounts.Service
 	logger         *slog.Logger
+	runtimes       external.Drivers
 }
 
-func NewBotAgentsHandler(log *slog.Logger, service *botagents.Service, botService *bots.Service, accountService *accounts.Service) *BotAgentsHandler {
+func NewBotAgentsHandler(log *slog.Logger, service *botagents.Service, botService *bots.Service, accountService *accounts.Service, runtimes external.Drivers) *BotAgentsHandler {
 	return &BotAgentsHandler{
 		service:        service,
 		botService:     botService,
 		accountService: accountService,
 		logger:         log.With(slog.String("handler", "bot_agents")),
+		runtimes:       runtimes,
 	}
 }
 
@@ -35,13 +38,50 @@ func (h *BotAgentsHandler) Register(e *echo.Echo) {
 	group.POST("", h.Create)
 	group.GET("", h.List)
 	group.GET("/:id", h.Get)
+	group.GET("/:id/models", h.ListModels)
 	group.PATCH("/:id", h.Update)
 	group.DELETE("/:id", h.Delete)
 }
 
+// ListModels godoc
+// @Summary List models available to a bot Agent
+// @Tags bot-agents
+// @Param bot_id path string true "Bot ID"
+// @Param id path string true "Agent ID"
+// @Success 200 {object} external.ModelCatalog
+// @Failure 403 {object} ErrorResponse
+// @Failure 404 {object} apperror.Problem
+// @Failure 503 {object} apperror.Problem
+// @Router /bots/{bot_id}/agents/{id}/models [get].
+func (h *BotAgentsHandler) ListModels(c echo.Context) error {
+	botID, err := h.authorize(c, bots.PermissionWorkspaceExec)
+	if err != nil {
+		return err
+	}
+	agent, err := h.service.GetActive(c.Request().Context(), botID, strings.TrimSpace(c.Param("id")))
+	if err != nil {
+		return h.publicError("list models", err)
+	}
+	catalog, err := h.runtimes.ModelCatalog(c.Request().Context(), agent.Runtime, botID, agent.ID)
+	if err != nil {
+		// Stable runtime feedback (agent_dependency_missing and friends) keeps
+		// its own status and args; wrapping it as runtime-unavailable would
+		// lose both and hide the install task from the web.
+		if feedbackErr := acpFeedbackHTTPError(err); feedbackErr != nil {
+			return feedbackErr
+		}
+		if apperror.CodeOf(err) != "" {
+			return err
+		}
+		h.logger.Error("bot Agent model catalog failed", slog.String("runtime", agent.Runtime), slog.Any("error", err))
+		return apperror.Wrap(apperror.CodeExternalRuntimeUnavailable, err, map[string]string{"runtime": agent.Runtime})
+	}
+	return c.JSON(http.StatusOK, catalog)
+}
+
 // Create godoc
 // @Summary Add an Agent to a bot
-// @Description Add a named Agent backed by a runtime descriptor
+// @Description Add a named Agent backed by a runtime descriptor. Omit enabled to create it enabled; pass enabled=false to hold a direct-runtime Agent back until its workspace dependency preflight passes. The response reports that dependency (dependency_id) when the runtime declares one.
 // @Tags bot-agents
 // @Accept json
 // @Produce json
@@ -65,12 +105,12 @@ func (h *BotAgentsHandler) Create(c echo.Context) error {
 	if err != nil {
 		return h.publicError("create", err)
 	}
-	return c.JSON(http.StatusCreated, agent)
+	return c.JSON(http.StatusCreated, h.withDependency(agent))
 }
 
 // List godoc
 // @Summary List a bot's Agents
-// @Description List active and disabled non-deleted Agents attached to a bot
+// @Description List active and disabled non-deleted Agents attached to a bot. Direct-runtime Agents carry the workspace dependency their runtime declares.
 // @Tags bot-agents
 // @Produce json
 // @Param bot_id path string true "Bot ID"
@@ -86,12 +126,12 @@ func (h *BotAgentsHandler) List(c echo.Context) error {
 	if err != nil {
 		return h.publicError("list", err)
 	}
-	return c.JSON(http.StatusOK, botagents.ListResponse{Items: items})
+	return c.JSON(http.StatusOK, botagents.ListResponse{Items: h.withDependencies(items)})
 }
 
 // Get godoc
 // @Summary Get a bot Agent
-// @Description Get one Agent attached to a bot
+// @Description Get one Agent attached to a bot, including the workspace dependency its runtime declares (omitted for runtimes without one).
 // @Tags bot-agents
 // @Produce json
 // @Param bot_id path string true "Bot ID"
@@ -109,12 +149,12 @@ func (h *BotAgentsHandler) Get(c echo.Context) error {
 	if err != nil {
 		return h.publicError("get", err)
 	}
-	return c.JSON(http.StatusOK, agent)
+	return c.JSON(http.StatusOK, h.withDependency(agent))
 }
 
 // Update godoc
 // @Summary Update a bot Agent
-// @Description Rename, enable, or disable an Agent; runtime metadata is immutable
+// @Description Update an Agent's name, availability, or runtime configuration
 // @Tags bot-agents
 // @Accept json
 // @Produce json
@@ -140,7 +180,10 @@ func (h *BotAgentsHandler) Update(c echo.Context) error {
 	if err != nil {
 		return h.publicError("update", err)
 	}
-	return c.JSON(http.StatusOK, agent)
+	if req.Metadata != nil {
+		h.runtimes.ResetBotAgent(agent.Runtime, botID, agent.ID)
+	}
+	return c.JSON(http.StatusOK, h.withDependency(agent))
 }
 
 // Delete godoc
@@ -159,7 +202,18 @@ func (h *BotAgentsHandler) Delete(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := h.service.Delete(c.Request().Context(), botID, strings.TrimSpace(c.Param("id"))); err != nil {
+	botAgentID := strings.TrimSpace(c.Param("id"))
+	err = h.service.Delete(c.Request().Context(), botID, botAgentID, func(agent botagents.BotAgent) error {
+		purgeErr := h.runtimes.PurgeBotAgentAuth(c.Request().Context(), agent.Runtime, botID, botAgentID)
+		if purgeErr != nil && apperror.CodeOf(purgeErr) == "" {
+			return apperror.Wrap(apperror.CodeAgentCredentialMaterializationFailed, purgeErr, nil)
+		}
+		return purgeErr
+	})
+	if err != nil {
+		if apperror.CodeOf(err) != "" {
+			return err
+		}
 		return h.publicError("delete", err)
 	}
 	return c.NoContent(http.StatusNoContent)
@@ -194,7 +248,7 @@ func botAgentHTTPError(err error) error {
 		return apperror.New(apperror.CodeBotAgentNotFound, nil)
 	case errors.Is(err, botagents.ErrNameTaken):
 		return apperror.New(apperror.CodeBotAgentNameTaken, nil)
-	case errors.Is(err, botagents.ErrInvalidRuntime):
+	case errors.Is(err, botagents.ErrInvalidRuntime), errors.Is(err, botagents.ErrProviderDirectRuntime):
 		return apperror.New(apperror.CodeBotAgentInvalidRuntime, nil)
 	case errors.Is(err, botagents.ErrInvalidMetadata):
 		return apperror.New(apperror.CodeBotAgentInvalidMetadata, nil)
@@ -208,4 +262,30 @@ func botAgentHTTPError(err error) error {
 		return apperror.New(apperror.CodeBotAgentUnavailable, map[string]string{"field": configErr.Field})
 	}
 	return nil
+}
+
+// withDependency projects the driver-declared workspace dependency onto the
+// agent so the web can run the install preflight before
+// enabling it. Direct agents share the runtimekind vocabulary with their
+// driver (botagents.RuntimeCodex == codex.RuntimeType), so the agent's
+// runtime is the lookup key; runtimes without a declaration leave it nil.
+func (h *BotAgentsHandler) withDependency(agent botagents.BotAgent) botagents.BotAgent {
+	agent.Dependency = dependencyFor(h.runtimes.RequiredDependencies(), agent.Runtime)
+	return agent
+}
+
+func (h *BotAgentsHandler) withDependencies(agents []botagents.BotAgent) []botagents.BotAgent {
+	requirements := h.runtimes.RequiredDependencies()
+	for i := range agents {
+		agents[i].Dependency = dependencyFor(requirements, agents[i].Runtime)
+	}
+	return agents
+}
+
+func dependencyFor(requirements map[string]external.DependencyRequirement, runtime string) *botagents.DependencyRequirement {
+	requirement, ok := requirements[strings.TrimSpace(runtime)]
+	if !ok {
+		return nil
+	}
+	return &botagents.DependencyRequirement{DependencyID: requirement.DependencyID}
 }

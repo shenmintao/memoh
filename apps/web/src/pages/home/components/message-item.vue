@@ -194,13 +194,9 @@
         />
       </div>
 
-      <!-- Assistant message blocks. The vertical gap between a process/"Thought
-           for Ns" row and the body is ~15% tighter than the body↔rule gap
-           (1.36rem vs the 1.6rem --ms-flow-hr-y): close to the unified rhythm,
-           but the channel-process line was sitting a touch too far from the
-           answer at full parity. -->
+      <!-- Assistant blocks and the live process preview share one vertical rhythm. -->
       <div v-else>
-        <div class="space-y-[0.85rem]">
+        <div class="[--chat-process-gap:0.85rem] space-y-[var(--chat-process-gap)]">
           <template
             v-for="node in renderNodes"
             :key="node.key"
@@ -210,6 +206,7 @@
             <ToolCallGroup
               v-if="node.kind === 'process'"
               :items="node.items"
+              :show-execution-location="showExecutionLocation"
               :message-id="message.id"
               :active="message.streaming && node.lastIndex === message.messages.length - 1"
             />
@@ -253,6 +250,15 @@
                 />
               </div>
 
+              <!-- Missing dependency: manager review and installation entry. -->
+              <DependencyMissingBlock
+                v-else-if="isDependencyMissingBlock(node.block)"
+                :block="(node.block as ErrorBlock)"
+                :bot-id="botId"
+                :bot-name="botName"
+                :session-id="sessionId"
+              />
+
               <!-- Error block -->
               <div
                 v-else-if="node.block.type === 'error' && (node.block.code || node.block.content)"
@@ -260,6 +266,17 @@
               >
                 <CircleAlert class="mt-0.5 size-3.5 shrink-0" />
                 <span class="min-w-0 whitespace-pre-wrap break-words">{{ errorBlockContent(node.block) }}</span>
+              </div>
+
+              <!-- Runtime notice block: a degradation the runtime wants the
+                   user to see (tools unavailable, an interaction declined).
+                   Warning-toned, quieter than an error — the turn continues. -->
+              <div
+                v-else-if="node.block.type === 'notice' && node.block.content"
+                class="flex items-start gap-2 rounded-md border border-warning-border bg-warning-soft px-3 py-2 text-xs text-warning-foreground"
+              >
+                <TriangleAlert class="mt-0.5 size-3.5 shrink-0" />
+                <span class="min-w-0 whitespace-pre-wrap break-words">{{ node.block.content }}</span>
               </div>
 
               <!-- Attachment block. An assistant turn posts images as reply
@@ -279,7 +296,7 @@
                same shimmer the Thinking/running states use (running = shimmer,
                done = solid), so it reads as the first link of the chain the
                Thinking block continues — not a separate loading widget. The phrase
-               also types in (a stepped clip-path wipe) on entry; keyed by the hint
+               also types in (a stepped clip-path wipe) on entry; keyed by the message
                so it replays once per turn. -->
           <div
             v-if="message.streaming && !hasVisibleAssistantBlocks"
@@ -287,9 +304,9 @@
           >
             <div class="flex items-center gap-1.5 py-px text-cop-title select-none">
               <span
-                :key="thinkingHint"
-                class="inline-block whitespace-nowrap tracking-[0.01em] tool-shimmer-text cop-typewriter"
-              >{{ thinkingHint }}…</span>
+                :key="message.id"
+                class="inline-block whitespace-nowrap tool-shimmer-text cop-typewriter"
+              >{{ t('chat.process.starting') }}</span>
             </div>
           </div>
         </div>
@@ -361,20 +378,20 @@ if (typeof document !== 'undefined') {
 
 <script setup lang="ts">
 import { computed, nextTick, ref, toRef, useTemplateRef, watch } from 'vue'
-import { CircleAlert, Sparkles } from 'lucide-vue-next'
+import { CircleAlert, Sparkles, TriangleAlert } from 'lucide-vue-next'
 import { formatRelativeTime, formatDateTime, formatCalendarTime } from '@/utils/date-time'
 import { Avatar, AvatarImage, AvatarFallback, Button, Textarea } from '@felinic/ui'
 import MarkdownRender, { enableKatex, enableMermaid } from 'markstream-vue'
 import { useSettingsStore } from '@/store/settings'
 import ToolCallGroup from './tool-call-group.vue'
 import ChatAnswersCard from './chat-answers-card.vue'
-import { toolSegmentCategoryForBlock } from './tool-call-registry'
-import type { ToolSegmentCategory } from './tool-call-registry'
 import { finalizeReasoning, markReasoningSeen } from './reasoning-timing'
 import AttachmentBlock from './attachment-block.vue'
 import CollapsibleUserText from './collapsible-user-text.vue'
 import MessageActions from './message-actions.vue'
 import BackgroundTaskBlock from './background-task-block.vue'
+import DependencyMissingBlock from './dependency-missing-block.vue'
+import { isDependencyMissingBlock } from './dependency-missing'
 import ChannelBadge from '@/components/chat-list/channel-badge/index.vue'
 import { useUserStore } from '@/store/user'
 import { useI18n } from 'vue-i18n'
@@ -413,6 +430,7 @@ const emit = defineEmits<{
 const props = defineProps<{
   message: ChatMessage
   botId?: string
+  sessionId?: string
   // Group layout for third-party synced threads: every turn left-aligned with
   // an avatar + sender name + channel badge (including the bot's own replies).
   channelThread?: boolean
@@ -428,6 +446,18 @@ const props = defineProps<{
   isScrolling: boolean
   isLastMessage?: boolean
 }>()
+
+// Compare the whole reply, including tools separated by assistant text.
+const showExecutionLocation = computed(() => {
+  if (props.message.role !== 'assistant') return false
+  const locations = new Set<string>()
+  for (const block of props.message.messages) {
+    if (block.type !== 'tool' || !block.execution_location) continue
+    const { kind, name } = block.execution_location
+    locations.add(kind === 'native' ? 'native' : `${kind}:${name?.trim() ?? ''}`)
+  }
+  return locations.size > 1
+})
 
 const userStore = useUserStore()
 
@@ -447,7 +477,7 @@ const isSelf = computed(() =>
 )
 
 
-const { t, te, tm, rt, locale } = useI18n()
+const { t, te, locale } = useI18n()
 const editTextarea = ref<InstanceType<typeof Textarea> | null>(null)
 const isEditingUserMessage = ref(false)
 const editDraft = ref('')
@@ -465,18 +495,6 @@ function handleRetry() {
 function handleFork() {
   if (turnId.value) emit('forkMessage', turnId.value)
 }
-
-// The pre-stream "running" line picks one phrase and holds it for the turn:
-// seeded by the message id so it stays put across re-renders/refetches instead
-// of flickering between phrases on every reactive update.
-const thinkingHint = computed(() => {
-  const hints = tm('chat.process.thinkingHints') as unknown[]
-  if (!Array.isArray(hints) || hints.length === 0) return t('chat.thinking')
-  let seed = 0
-  for (const ch of props.message.id) seed = (seed + ch.charCodeAt(0)) % 100000
-  return rt(hints[seed % hints.length] as Parameters<typeof rt>[0])
-})
-
 
 const replySenderLabel = computed(() => {
   if (props.message.role !== 'user') return ''
@@ -778,6 +796,7 @@ function isVisibleAssistantBlock(block: ContentBlock): boolean {
   if (block.type === 'tool') return true
   if (block.type === 'text') return Boolean(block.content)
   if (block.type === 'error') return Boolean(block.code || block.content)
+  if (block.type === 'notice') return Boolean(block.content)
   if (block.type === 'attachments') return block.attachments.length > 0
   return true
 }
@@ -788,15 +807,9 @@ function errorBlockContent(block: ErrorBlock): string {
   return key && te(key) ? t(key) : block.content
 }
 
-// Project the flat assistant block list into render nodes.
-//  - A "process" node is a run of consecutive tool + reasoning blocks. It splits
-//    by tool category (read-only "explore" vs side-effecting "action" vs "gui")
-//    so reads and edits don't merge into one bucket, while browser/computer
-//    observe+action steps stay together as one browsing activity; reasoning
-//    rides along with whichever segment it sits next to (never standalone).
-//  - Every other block type (text / error / attachments) keeps its place.
-// Keyed by stable block id.
-type ProcessNode = { kind: 'process'; key: string; items: ContentBlock[]; cat: ToolSegmentCategory | null; lastIndex: number }
+// Consecutive tools and reasoning form one process, regardless of tool kind.
+// Text, errors, attachments and completed questions retain their own positions.
+type ProcessNode = { kind: 'process'; key: string; items: ContentBlock[]; lastIndex: number }
 type AnswersNode = { kind: 'answers'; key: string; block: ContentBlock; index: number }
 type BlockNode = { kind: 'block'; key: string; block: ContentBlock; index: number }
 type RenderNode = ProcessNode | AnswersNode | BlockNode
@@ -834,20 +847,12 @@ const renderNodes = computed<RenderNode[]>(() => {
       return
     }
     if (block.type === 'tool' || block.type === 'reasoning') {
-      const cat = block.type === 'tool'
-        ? toolSegmentCategoryForBlock(block as ToolCallBlockType)
-        : null
       if (!run) {
-        run = { kind: 'process', key: `p${block.id}`, items: [block], cat, lastIndex: index }
-        nodes.push(run)
-      } else if (cat !== null && run.cat !== null && cat !== run.cat) {
-        // Category switch (e.g. finished reading, now editing) → new segment.
-        run = { kind: 'process', key: `p${block.id}`, items: [block], cat, lastIndex: index }
+        run = { kind: 'process', key: `p${block.id}`, items: [block], lastIndex: index }
         nodes.push(run)
       } else {
         run.items.push(block)
         run.lastIndex = index
-        if (run.cat === null && cat !== null) run.cat = cat
       }
     } else {
       run = null

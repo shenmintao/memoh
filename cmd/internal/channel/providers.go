@@ -21,6 +21,8 @@ import (
 	"github.com/felinics/memoh/internal/accounts"
 	"github.com/felinics/memoh/internal/acl"
 	acpprofileadapter "github.com/felinics/memoh/internal/agent/adapter/acpprofile"
+	"github.com/felinics/memoh/internal/agent/adapter/channelqueue"
+	"github.com/felinics/memoh/internal/agent/application"
 	"github.com/felinics/memoh/internal/agent/context/compaction"
 	userinput "github.com/felinics/memoh/internal/agent/decision/input"
 	"github.com/felinics/memoh/internal/agent/turn"
@@ -75,8 +77,8 @@ import (
 	"github.com/felinics/memoh/internal/workspace/bridge"
 )
 
-func providePipeline() *timeline.Pipeline {
-	return timeline.NewPipeline(timeline.RenderParams{})
+func providePipeline(log *slog.Logger) *timeline.Pipeline {
+	return timeline.NewPipelineWithOptions(timeline.RenderParams{}, timeline.PipelineOptions{Logger: log})
 }
 
 func provideLocalMediaService(log *slog.Logger, cfg config.Config) *media.Service {
@@ -88,7 +90,9 @@ func provideLocalMediaService(log *slog.Logger, cfg config.Config) *media.Servic
 }
 
 func provideEventStore(log *slog.Logger, queries dbstore.Queries) *timeline.EventStore {
-	return timeline.NewEventStore(log, queries)
+	store := timeline.NewEventStore(log, queries)
+	store.SetReplayArtifactProvider(compaction.NewTimelineArtifactSource(queries))
+	return store
 }
 
 func provideDiscussDriver(log *slog.Logger, eventStore *timeline.EventStore, msgService *message.DBService, queries dbstore.Queries, cfg config.Config) *discuss.DiscussDriver {
@@ -219,6 +223,7 @@ func provideChannelRouter(
 	discussDriver *discuss.DiscussDriver,
 	cfg config.Config,
 	cmdHandler inbound.CommandHandler,
+	queueHandler inbound.QueueCommandHandler,
 	skillResolver inbound.RequestedSkillResolver,
 ) *inbound.ChannelInboundProcessor {
 	adapter, ok := registry.Get(qq.Type)
@@ -239,9 +244,11 @@ func provideChannelRouter(
 	discussDriver.SetTurnService(turnService)
 	discussDriver.SetBroadcaster(hub)
 	processor.SetACLService(aclService)
+	if adapter, ok := registry.Get(telegram.Type); ok {
+		adapter.(*telegram.TelegramAdapter).SetUserInputAuthorizer(processor.AuthorizeUserInputInteraction)
+	}
 	processor.SetMediaService(mediaService)
 	processor.SetStreamObserver(local.NewRouteHubBroadcaster(hub))
-	processor.SetDispatcher(inbound.NewRouteDispatcher(log))
 	processor.SetSpeechService(audioService, &settingsSpeechModelResolver{settings: settingsService})
 	processor.SetTranscriptionService(audioService, &settingsTranscriptionModelResolver{settings: settingsService})
 	processor.SetIMDisplayOptions(&settingsIMDisplayOptions{settings: settingsService})
@@ -250,6 +257,7 @@ func provideChannelRouter(
 	processor.SetACPProfileResolver(acpprofileadapter.NewCatalog())
 	processor.SetBotPermissionChecker(&botPermissionCheckerAdapter{bots: botService, accounts: accountService})
 	processor.SetCommandHandler(cmdHandler)
+	processor.SetQueueCommandHandler(queueHandler)
 	processor.SetRequestedSkillResolver(skillResolver)
 	return processor
 }
@@ -558,6 +566,10 @@ func provideLocalChannelAudio(service *audiopkg.Service) channelAudio {
 }
 
 func provideLocalCommandHandler(handler *command.Handler) inbound.CommandHandler { return handler }
+
+func provideLocalQueueCommandHandler(service *application.Service) inbound.QueueCommandHandler {
+	return channelqueue.New(service)
+}
 
 func provideLocalSkillResolver(handler *handlers.ContainerdHandler) inbound.RequestedSkillResolver {
 	return handler

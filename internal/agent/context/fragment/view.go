@@ -7,6 +7,7 @@ type Intent string
 const (
 	IntentRunConfigPreProvider Intent = "run_config_pre_provider"
 	IntentDiscussReply         Intent = "discuss_reply"
+	IntentExternalAgentPrompt  Intent = "external_agent_prompt"
 )
 
 func (i Intent) ManifestView() ManifestView {
@@ -15,7 +16,10 @@ func (i Intent) ManifestView() ManifestView {
 
 type RenderTarget string
 
-const RenderSDKMessages RenderTarget = "sdk_messages"
+const (
+	RenderSDKMessages        RenderTarget = "sdk_messages"
+	RenderRuntimeFullContext RenderTarget = "runtime_full_context"
+)
 
 // NormalizeContextRefs fills durable refs and canonical hashes for fragments
 // coming from collectors, mirroring what Compile does for legacy inputs.

@@ -465,7 +465,7 @@ func slashUserMessage(code string) string {
 	case slash.CodeInvalidQuickActionScope:
 		return "This quick action cannot be scoped to a session."
 	case slash.CodePermissionSessionRequired:
-		return "Open an external-Agent session before using /permission."
+		return "Open an External Agent session before using /permission."
 	case slash.CodePermissionModeUnsupported:
 		return "This Agent does not declare selectable session modes."
 	case slash.CodePermissionModeUnavailable:
@@ -506,9 +506,8 @@ func (h *LocalChannelHandler) classifyWebSlash(text string, hasAttachments bool,
 		Surface:        surface,
 		IsGroup:        false,
 		Directed:       true,
-		SupportsMode:   false,
 		KnownCommand: func(resource string) bool {
-			if resource == "help" || resource == "skill" || resource == "permission" {
+			if resource == "help" || resource == "skill" || resource == "permission" || resource == "steer" || resource == "queue" {
 				return true
 			}
 			return h.commandHandler != nil && h.commandHandler.HasCommandResource(resource)
@@ -536,6 +535,9 @@ func (h *LocalChannelHandler) classifyWebSlashForSession(ctx context.Context, te
 			Invocation:   decision.Invocation,
 			AgentCommand: selector,
 		}
+	}
+	if decision.Kind == slash.DecisionCommandAction && (decision.Command.Resource == "steer" || decision.Command.Resource == "queue") {
+		return decision
 	}
 	if isReservedWebACPControl(selector) ||
 		(decision.Invocation != nil && isReservedWebACPControl(decision.Invocation.Parsed.Resource)) {
@@ -642,6 +644,8 @@ func webActionID(resource, action string) string {
 		return "skill.list"
 	case resource == "permission":
 		return "permission"
+	case resource == "steer" || resource == "queue":
+		return resource
 	default:
 		return ""
 	}
@@ -659,6 +663,40 @@ func sendWSCommandResult(writer *wsWriter, msg wsClientMessage, actionID string,
 	event.Type = "command_result"
 	event.Result = result
 	writer.SendJSON(event)
+}
+
+// Queue commands share REST admission and invocation identity. They never start
+// a parallel chat turn or pass the command selector to the model.
+func (h *LocalChannelHandler) executeWSQueueCommand(ctx context.Context, writer *wsWriter, msg wsClientMessage, botID, actionID, text string) {
+	var err error
+	switch {
+	case strings.TrimSpace(msg.SessionID) == "" || strings.TrimSpace(text) == "":
+		err = apperror.New(apperror.CodeQueueRequestInvalid, nil)
+	default:
+		var payload []byte
+		payload, err = marshalQueuePayload(text)
+		if err == nil {
+			if actionID == "steer" {
+				_, err = h.agentService.EnqueueSteer(ctx, botID, msg.SessionID, msg.InvocationID, payload)
+			} else {
+				_, err = h.agentService.EnqueueFollowUp(ctx, botID, msg.SessionID, msg.InvocationID, payload)
+			}
+		}
+		err = queueAdmissionError(err)
+	}
+	if err != nil {
+		public, ok := apperror.PublicFrom(err, "")
+		if !ok {
+			h.logger.Error("web queue command failed", slog.Any("error", err))
+			public, _ = apperror.PublicFrom(apperror.New(apperror.CodeQueueAdmissionUnavailable, nil), "")
+		}
+		event := commandEvent(msg.InvocationID, msg.ComposerScope, msg.SessionID, actionID)
+		event.Type = "command_error"
+		event.Error = &CommandActionError{Code: string(public.Code), Message: public.Detail}
+		writer.SendJSON(event)
+		return
+	}
+	sendWSCommandResult(writer, msg, actionID, &CommandActionResult{Kind: "queue_accepted"})
 }
 
 // StreamMessages godoc
@@ -1438,9 +1476,10 @@ type wsRunAdmissionBuilder func(context.Context, sessionruntime.RunHandle) (sess
 // wsAdmittedTurn is the turn identity a run was admitted with. A zero value
 // means no admission decided the turn, so the history layer allocates one.
 type wsAdmittedTurn struct {
-	InjectCh <-chan turn.InjectMessage
 	TurnID   string
 	Position *int64
+	Handle   sessionruntime.RunHandle
+	InjectCh chan turn.InjectMessage
 }
 
 // wsSubmission is the canonical form of what a client sent. Its bytes decide
@@ -1720,8 +1759,11 @@ func (h *LocalChannelHandler) startWSStream(baseCtx, connCtx context.Context, wr
 				defer onFinish()
 			}
 			defer close(eventCh)
-			return runner(streamCtx, ref, wsAdmittedTurn{TurnID: admission.TurnID, Position: admission.TurnPosition, InjectCh: injectCh}, eventCh, abortCh)
+			return runner(streamCtx, ref, wsAdmittedTurn{TurnID: admission.TurnID, Position: admission.TurnPosition, Handle: admission.Handle, InjectCh: injectCh}, eventCh, abortCh)
 		}()
+		// Legacy App controls can still enqueue while terminal events drain.
+		// Leave this borrowed channel open; FinishRun stops its senders and
+		// streamCancel releases readers, including when finalization fails.
 		// Every event this run produced has to be published before the run is
 		// declared finished, or a subscriber is shown the terminal state and then
 		// handed output that supposedly preceded it. The forwarder cannot outlive
@@ -1868,7 +1910,7 @@ func (h *LocalChannelHandler) HandleWebSocket(c echo.Context) error {
 				sendWSControlAck(writer, ref, "steer", controlID, false, "steer_forbidden")
 				continue
 			}
-			if _, err := h.authorizeWSACPExecution(streamBaseCtx, channelIdentityID, botID, ref.SessionID); err != nil {
+			if _, err := h.authorizeWSRuntimeExecution(streamBaseCtx, channelIdentityID, botID, ref.SessionID); err != nil {
 				sendWSControlAck(writer, ref, "steer", controlID, false, "steer_forbidden")
 				continue
 			}
@@ -2087,6 +2129,10 @@ func (h *LocalChannelHandler) HandleWebSocket(c echo.Context) error {
 						continue
 					}
 				}
+				if actionID == "steer" || actionID == "queue" {
+					h.executeWSQueueCommand(streamBaseCtx, writer, msg, botID, actionID, decision.Invocation.Rest)
+					continue
+				}
 				skillActivationAllowed := true
 				if strings.TrimSpace(sessionID) != "" && !permissionAction {
 					supported, supportErr := h.wsSessionSupportsRequestedSkills(streamBaseCtx, sessionID)
@@ -2227,7 +2273,7 @@ func (h *LocalChannelHandler) HandleWebSocket(c echo.Context) error {
 					releaseActiveWSTurnNow()
 					continue
 				}
-				created, createErr := h.createWSChatSession(streamBaseCtx, botID, channelIdentityID)
+				created, createErr := h.createWSChatSession(streamBaseCtx, botID, channelIdentityID, msg.ModelID, msg.ReasoningEffort)
 				if createErr != nil {
 					sendWSError(writer, ref, createErr.Error())
 					releaseActiveWSTurnNow()
@@ -2257,20 +2303,20 @@ func (h *LocalChannelHandler) HandleWebSocket(c echo.Context) error {
 					continue
 				}
 			}
-			acpInfo, err := h.authorizeWSACPExecution(c.Request().Context(), channelIdentityID, botID, sessionID)
+			runtimeInfo, err := h.authorizeWSRuntimeExecution(c.Request().Context(), channelIdentityID, botID, sessionID)
 			if err != nil {
 				sendWSErrorFromError(writer, ref, err)
 				releaseActiveWSTurnNow()
 				continue
 			}
-			if acpInfo.IsACP && len(requestedSkillContexts) > 0 {
+			if runtimeInfo.RequiresWorkspaceExec && len(requestedSkillContexts) > 0 {
 				sendWSCommandError(writer, msg, slash.CodeUnsupportedSkillSlashContext)
 				releaseActiveWSTurnNow()
 				continue
 			}
 			streamToken := bearerToken
-			if acpInfo.IsACP {
-				streamToken = h.issueRuntimeOwnerBearerToken(acpInfo.RuntimeOwnerAccountID, bearerToken)
+			if runtimeInfo.RequiresWorkspaceExec {
+				streamToken = h.issueRuntimeOwnerBearerToken(runtimeInfo.RuntimeOwnerAccountID, bearerToken)
 			}
 			var ingestedActivationAttachments []turn.Attachment
 			userMessagePersisted := false
@@ -2341,7 +2387,14 @@ func (h *LocalChannelHandler) HandleWebSocket(c echo.Context) error {
 			h.startWSStream(streamBaseCtx, connCtx, writer, botID, ref, "ws stream error", submission, messageAdmission.build, releaseActiveWSTurn,
 				func(ctx context.Context, runRef wsTurnRef, admittedTurn wsAdmittedTurn, eventCh chan<- application.WSStreamEvent, abortCh <-chan struct{}) error {
 					req := application.ChatRequest{
-						InjectCh:                admittedTurn.InjectCh,
+						OnModelPreferenceSettled: func() {
+							writer.SendJSON(wsOutboundEvent{
+								Type:         "model_preference_settled",
+								RunID:        runRef.RunID,
+								InvocationID: runRef.InvocationID,
+								SessionID:    runRef.SessionID,
+							})
+						},
 						BotID:                   botID,
 						ChatID:                  botID,
 						ThreadID:                sessionID,
@@ -2374,6 +2427,9 @@ func (h *LocalChannelHandler) HandleWebSocket(c echo.Context) error {
 						WorkspaceTargetID:       workspaceTargetID,
 						ToolHTTPURL:             buildACPMCPToolsURL(c, botID),
 						AgentCommand:            decision.AgentCommand,
+						RunHandle:               admittedTurn.Handle,
+						InjectCh:                admittedTurn.InjectCh,
+						QueueSteerEnabled:       admittedTurn.InjectCh != nil,
 					}
 					if preparedActivationReq != nil {
 						req.Messages = preparedActivationReq.Messages
@@ -2453,6 +2509,16 @@ func (h *LocalChannelHandler) HandleWebSocket(c echo.Context) error {
 					input.RunID = runRef.RunID
 					input.TurnID = admittedTurn.TurnID
 					input.TurnPosition = admittedTurn.Position
+					input.RunHandle = admittedTurn.Handle
+					input.InjectCh = admittedTurn.InjectCh
+					input.OnModelPreferenceSettled = func() {
+						writer.SendJSON(wsOutboundEvent{
+							Type:         "model_preference_settled",
+							RunID:        runRef.RunID,
+							InvocationID: runRef.InvocationID,
+							SessionID:    runRef.SessionID,
+						})
+					}
 					return h.agentService.RetryLatestMessageWS(ctx, input, eventCh, abortCh)
 				},
 			)
@@ -2546,7 +2612,17 @@ func (h *LocalChannelHandler) HandleWebSocket(c echo.Context) error {
 					input.RunID = runRef.RunID
 					input.TurnID = admittedTurn.TurnID
 					input.TurnPosition = admittedTurn.Position
+					input.RunHandle = admittedTurn.Handle
+					input.InjectCh = admittedTurn.InjectCh
 					input.Attachments = editAdmission.preparedAttachments()
+					input.OnModelPreferenceSettled = func() {
+						writer.SendJSON(wsOutboundEvent{
+							Type:         "model_preference_settled",
+							RunID:        runRef.RunID,
+							InvocationID: runRef.InvocationID,
+							SessionID:    runRef.SessionID,
+						})
+					}
 					return h.agentService.EditLatestMessageWS(ctx, input, eventCh, abortCh)
 				},
 			)
@@ -2572,16 +2648,40 @@ func userInputResponseAppError(err error) error {
 	}
 }
 
-func (h *LocalChannelHandler) createWSChatSession(ctx context.Context, botID, channelIdentityID string) (sessionpkg.Thread, error) {
+// createWSChatSession creates the web session for a first message. The
+// request's (model, effort) pair is written into the INSERT (issue #879,
+// spec §3.3-D) so the session is born with the pair: the session_created
+// broadcast that follows can never be observed with empty preference.
+// Channel-side creation (inbound) calls thread.Create without these fields,
+// so channel sessions are born with NULL preference.
+func (h *LocalChannelHandler) createWSChatSession(ctx context.Context, botID, channelIdentityID, modelID, reasoningEffort string) (sessionpkg.Thread, error) {
 	if h == nil || h.sessionService == nil {
 		return sessionpkg.Thread{}, errors.New("session service not configured")
 	}
-	return h.sessionService.Create(ctx, sessionpkg.CreateInput{
+	input := sessionpkg.CreateInput{
 		BotID:           strings.TrimSpace(botID),
 		ChannelType:     h.channelType.String(),
 		Type:            sessionpkg.TypeChat,
 		CreatedByUserID: strings.TrimSpace(channelIdentityID),
-	})
+	}
+	// Reconcile a carried pair exactly like the REST first-send (spec §3.3:
+	// every write point reconciles). Without it a stale composer draft naming
+	// a deleted model dies as an FK violation, a slug degrades to a (NULL,
+	// effort) half pair, and an illegal effort lands in the row raw. Messages
+	// that omit the pair (default-sourced) keep both fields empty → NULL
+	// preference, and the session follows the bot default live.
+	if strings.TrimSpace(modelID) != "" || strings.TrimSpace(reasoningEffort) != "" {
+		if h.agentService == nil {
+			return sessionpkg.Thread{}, errors.New("agent service not configured")
+		}
+		prefModelID, prefEffort, err := h.agentService.ReconcileSessionModelPreference(ctx, input.BotID, modelID, reasoningEffort)
+		if err != nil {
+			return sessionpkg.Thread{}, err
+		}
+		input.PreferredChatModelID = prefModelID
+		input.PreferredReasoningEffort = prefEffort
+	}
+	return h.sessionService.Create(ctx, input)
 }
 
 func (h *LocalChannelHandler) wsSessionSupportsRequestedSkills(ctx context.Context, sessionID string) (bool, error) {
@@ -2595,22 +2695,22 @@ func (h *LocalChannelHandler) wsSessionSupportsRequestedSkills(ctx context.Conte
 	return sessionpkg.SupportsSkillActivation(sess.SessionMode, sess.Type, sess.RuntimeType), nil
 }
 
-func (h *LocalChannelHandler) authorizeWSACPExecution(ctx context.Context, channelIdentityID, botID, sessionID string) (application.ACPSessionExecutionInfo, error) {
+func (h *LocalChannelHandler) authorizeWSRuntimeExecution(ctx context.Context, channelIdentityID, botID, sessionID string) (application.RuntimeSessionExecutionInfo, error) {
 	if h == nil || h.agentService == nil {
-		return application.ACPSessionExecutionInfo{}, nil
+		return application.RuntimeSessionExecutionInfo{}, nil
 	}
-	info, err := h.agentService.ACPSessionExecutionInfo(ctx, sessionID)
-	if err != nil || !info.IsACP {
+	info, err := h.agentService.RuntimeSessionExecutionInfo(ctx, sessionID)
+	if err != nil || !info.RequiresWorkspaceExec {
 		return info, err
 	}
 	if strings.TrimSpace(info.RuntimeOwnerAccountID) == "" {
-		feedback := acpRuntimeOwnerMissingFeedback()
+		feedback := externalAgentRuntimeOwnerMissingFeedback()
 		return info, echo.NewHTTPError(feedback.HTTPStatus, feedback)
 	}
 	bot, err := AuthorizeBotAccessWithPermission(ctx, h.botService, h.accountService, channelIdentityID, botID, bots.PermissionWorkspaceExec)
 	if err != nil {
 		if isHTTPStatus(err, http.StatusForbidden) {
-			feedback := acpNoWorkspaceExecFeedback("missing_workspace_exec", "You do not have permission to run workspace commands for this bot.")
+			feedback := externalAgentNoWorkspaceExecFeedback("missing_workspace_exec", "You do not have permission to run workspace commands for this bot.")
 			return info, echo.NewHTTPError(feedback.HTTPStatus, feedback)
 		}
 		return info, err
@@ -2622,7 +2722,7 @@ func (h *LocalChannelHandler) authorizeWSACPExecution(ctx context.Context, chann
 	if err != nil {
 		return info, err
 	}
-	if err := authorizeACPRuntimeSessionAccess(channelIdentityID, perms, info.RuntimeOwnerAccountID); err != nil {
+	if err := authorizeExternalAgentSessionAccess(channelIdentityID, perms, info.RuntimeOwnerAccountID); err != nil {
 		return info, err
 	}
 	return info, nil

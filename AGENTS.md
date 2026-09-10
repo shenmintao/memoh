@@ -1,5 +1,9 @@
 # AGENTS.md
 
+## Working Language
+
+The primary working language for this repository is **Chinese (中文)**, including issue and PR titles and bodies, review comments, and commit/PR discussion. Other languages (e.g. English) are not rejected — quoted code, error logs, and upstream English material stay as-is — but default to Chinese whenever you author new content.
+
 ## Project Overview
 
 Memoh is a multi-member, structured long-memory AI agent platform with isolated workspace runtimes. Users can create AI bots and chat with them via Telegram, Discord, Lark (Feishu), DingTalk, WeChat, Matrix, Email, and more. Each bot can use an independent container workspace to edit files, execute commands, run tools, and build itself while keeping runtime ownership explicit.
@@ -81,9 +85,14 @@ Memoh/
 │   │   ├── decision/           #     User input, tool approval, and stable user-facing feedback
 │   │   ├── event/              #     Agent events and transport payload vocabulary
 │   │   ├── runtime/            #     Runtime implementations
-│   │   │   ├── acp/            #       ACP pool, client process manager, and profiles
+│   │   │   ├── acp/            #       ACP pool, client process manager, and the generic custom-agent profile
+│   │   │   ├── claudecode/     #       Claude Code direct runtime (external.Driver)
+│   │   │   ├── codex/          #       Codex direct runtime (external.Driver)
+│   │   │   ├── external/       #       Neutral Driver port between the application layer and external runtimes
 │   │   │   ├── native/         #       Twilight AI native runtime, prompts, streaming, hooks, and guards
-│   │   │   └── session/        #       Per-thread runtime state and control
+│   │   │   ├── agentstate/     #       External Agent session publication heads and state storage port
+│   │   │   ├── session/        #       Per-thread runtime state and control
+│   │   │   └── toolmount/      #       Memoh tool gateway mounts for direct runtimes
 │   │   ├── sessionmode/        #     Session mode resolution
 │   │   ├── tool/               #     Native tool providers (package name remains tools)
 │   │       ├── message.go      #       Send message tool
@@ -377,8 +386,8 @@ PostgreSQL migrations live in `db/postgres/migrations/`:
 
 - Each bot can have an isolated **workspace container** for file editing, command execution, MCP tool hosting, and optional headed browser/desktop display sessions.
 - Container workspaces communicate with the host via a **gRPC bridge** over Unix Domain Sockets (UDS), not TCP.
-- The bridge binary (`cmd/bridge/`) runs inside each container as a read-only file mount, with UDS sockets under `/run/memoh/`. Toolkit binaries, display dependencies, and runtime scripts come from the versioned workspace image contract. When display is enabled the bridge can supervise Xvnc and a headed Chrome/Chromium process with CDP on port `9222`; the web UI then exposes a Display pane backed by screenshots/WebRTC/input forwarding. Treat VNC as the container desktop transport, not as the whole browser automation feature.
-- The canonical workspace image is built from `docker/Dockerfile.workspace`. Compatible custom/provider images must expose the same `/opt/memoh/workspace-contract.json`, toolkit, and script paths.
+- The bridge binary (`cmd/bridge/`) runs inside each container as a read-only file mount, with UDS sockets under `/run/memoh/`. Toolkit binaries (node, python, uv), display dependencies, and runtime scripts come from the workspace image; agent CLIs and other managed dependencies are installed per bot into `/data` by the workspace dependency manager (`internal/workspacedeps/`). When display is enabled the bridge can supervise Xvnc and a headed Chrome/Chromium process with CDP on port `9222`; the web UI then exposes a Display pane backed by screenshots/WebRTC/input forwarding. Treat VNC as the container desktop transport, not as the whole browser automation feature.
+- The canonical workspace image is built from `docker/Dockerfile.workspace`. There is no image-level compatibility check: custom/provider images that expose the same toolkit and script paths (`/opt/memoh/toolkit`, `/opt/memoh/scripts`) get the same base capabilities, and anything missing is reported at the point of use or discovered as an installable dependency.
 - `internal/workspace/` manages workspace lifecycle (create, start, stop, reconcile) and maintains a bridge gRPC connection pool for container runtimes.
 - `internal/container/` provides the container runtime abstraction layer and adapter subpackages (`docker`, `containerd`, `apple`). Snapshot/storage semantics differ by backend; do not assume containerd-style snapshot lineage for Docker or archive-backed flows.
 - SSE-based progress feedback is provided during container image pull and creation.
@@ -387,7 +396,8 @@ PostgreSQL migrations live in `db/postgres/migrations/`:
 
 The codebase has grown beyond the original agent/channel/container core. When working near these areas, read the local `AGENTS.md` and treat the corresponding `internal/` package as the source of truth; do not guess tool or schema details.
 
-- **ACP (`internal/agent/runtime/acp/`)** — runtime pool, client process manager, profiles, and OAuth integration for external ACP agents such as Claude Code and Codex. Stable user-facing ACP errors live in `internal/agent/decision/feedback/`.
+- **External coding-agent runtimes (`internal/agent/runtime/external/`, `codex/`, `claudecode/`)** — the neutral `external.Driver` port plus the direct Codex and Claude Code runtimes (pinned protocol assets, device-code/OAuth login, native thread resume/fork, Memoh tool gateway mounts via `toolmount/`). **ACP (`internal/agent/runtime/acp/`)** is the generic channel for custom user-supplied ACP agents (single generic profile with a managed launch command), folded into the same driver port. Stable user-facing runtime errors live in `internal/agent/decision/feedback/`.
+- **Workspace dependencies (`internal/workspacedeps/`)** — launcher resolution is read-only and must discover existing CLIs without a warm Supermarket cache. Chat and device-code login do not authorize installation: a Manage-authorized action confirms a frozen recipe revision. Direct Codex and Claude Code execution currently requires a native workspace; remote dependency management does not imply remote runtime support. Keep the Server/image upgrade boundary documented in `docs/workspace-dependencies-upgrade.md`.
 - **Skill Packages (`internal/skillpackages/`, `internal/supermarket/`)** — Supermarket Package discovery and installation state. Installed Packages expand into immutable Registry Skills in the selected workspace target.
 - **User input / `ask_user` (`internal/agent/decision/input/`)** — lets the in-process agent ask the user a question mid-conversation and wait for an answer.
 - **Bot backup / import / export (`internal/botbackup/`)** — archive-based bot portability with preview and merge/replace/skip strategies.

@@ -44,9 +44,9 @@ const (
 	DefaultPGVectorSSLMode       = "disable"
 	DefaultRuntimeDir            = "/opt/memoh/runtime"
 	DefaultBridgePath            = DefaultRuntimeDir + "/bridge"
-	DefaultWorkspaceImage        = "memohai/workspace:debian"
+	DefaultWorkspaceImage        = "memohai/workspace:debian-latest"
 	DefaultBaseImage             = DefaultWorkspaceImage
-	DefaultWorkspaceMirrorImage  = "memoh.cn/memohai/workspace:debian"
+	DefaultWorkspaceMirrorImage  = "memoh.cn/memohai/workspace:debian-latest"
 	DefaultTimezone              = "UTC"
 	DefaultAgentToolOutputBytes  = 64 * 1024
 	DefaultAgentToolOutputLines  = 2000
@@ -58,30 +58,31 @@ const (
 )
 
 type Config struct {
-	Log            LogConfig            `toml:"log"`
-	Server         ServerConfig         `toml:"server"`
-	Channel        ChannelConfig        `toml:"channel"`
-	InternalRPC    InternalRPCConfig    `toml:"internal_rpc"`
-	Admin          AdminConfig          `toml:"admin"`
-	Auth           AuthConfig           `toml:"auth"`
-	Agent          AgentConfig          `toml:"agent"`
-	Timezone       string               `toml:"timezone"`
-	Database       DatabaseConfig       `toml:"database"`
-	Container      ContainerConfig      `toml:"container"`
-	Containerd     ContainerdConfig     `toml:"containerd"`
-	Docker         DockerConfig         `toml:"docker"`
-	Apple          AppleConfig          `toml:"apple"`
-	Workspace      WorkspaceConfig      `toml:"workspace"`
-	Postgres       PostgresConfig       `toml:"postgres"`
-	PGVector       PGVectorConfig       `toml:"pgvector"`
-	Registry       RegistryConfig       `toml:"registry"`
-	Supermarket    SupermarketConfig    `toml:"supermarket"`
-	OAuthClients   OAuthClientsConfig   `toml:"oauth_clients"`
-	SessionRuntime SessionRuntimeConfig `toml:"session_runtime"`
-	InstanceID     string               `toml:"instance_id"`
-	BridgeTLS      BridgeTLSConfig      `toml:"bridge_tls"`
-	WebhookTunnel  WebhookTunnelConfig  `toml:"webhook_tunnel"`
-	ConnectIt      ConnectItConfig      `toml:"connect_it"`
+	Log                   LogConfig                   `toml:"log"`
+	Server                ServerConfig                `toml:"server"`
+	Channel               ChannelConfig               `toml:"channel"`
+	InternalRPC           InternalRPCConfig           `toml:"internal_rpc"`
+	Admin                 AdminConfig                 `toml:"admin"`
+	Auth                  AuthConfig                  `toml:"auth"`
+	Agent                 AgentConfig                 `toml:"agent"`
+	Timezone              string                      `toml:"timezone"`
+	Database              DatabaseConfig              `toml:"database"`
+	Container             ContainerConfig             `toml:"container"`
+	Containerd            ContainerdConfig            `toml:"containerd"`
+	Docker                DockerConfig                `toml:"docker"`
+	Apple                 AppleConfig                 `toml:"apple"`
+	Workspace             WorkspaceConfig             `toml:"workspace"`
+	Postgres              PostgresConfig              `toml:"postgres"`
+	PGVector              PGVectorConfig              `toml:"pgvector"`
+	Registry              RegistryConfig              `toml:"registry"`
+	Supermarket           SupermarketConfig           `toml:"supermarket"`
+	WorkspaceDependencies WorkspaceDependenciesConfig `toml:"workspace_dependencies"`
+	OAuthClients          OAuthClientsConfig          `toml:"oauth_clients"`
+	SessionRuntime        SessionRuntimeConfig        `toml:"session_runtime"`
+	InstanceID            string                      `toml:"instance_id"`
+	BridgeTLS             BridgeTLSConfig             `toml:"bridge_tls"`
+	WebhookTunnel         WebhookTunnelConfig         `toml:"webhook_tunnel"`
+	ConnectIt             ConnectItConfig             `toml:"connect_it"`
 }
 
 // ConnectItConfig is the deployment-level credential Memoh uses to call its
@@ -216,8 +217,9 @@ type AdminConfig struct {
 }
 
 type AuthConfig struct {
-	JWTSecret    string `toml:"jwt_secret"    json:"-"`
-	JWTExpiresIn string `toml:"jwt_expires_in"`
+	JWTSecret                     string `toml:"jwt_secret"                       json:"-"`
+	JWTExpiresIn                  string `toml:"jwt_expires_in"`
+	AgentCredentialsEncryptionKey string `toml:"agent_credentials_encryption_key" json:"-"`
 }
 
 type AgentConfig struct {
@@ -231,6 +233,13 @@ type AgentConfig struct {
 	// the model has no configured window. Zero or negative selects the
 	// built-in default; the cap can be raised but never disabled.
 	ContextAbsoluteMaxTokens int `toml:"context_absolute_max_tokens"`
+	// SyncCompaction gates the pre-turn synchronous compaction backstop on
+	// the discuss and pipeline-chat paths (CM-CMP-001/003): "shadow"
+	// (default) logs would-have-fired decisions without blocking, "active"
+	// compacts synchronously before the model call at the hard threshold,
+	// "off" disables the backstop. The legacy history chat path keeps its
+	// existing always-on synchronous backstop regardless of this setting.
+	SyncCompaction string `toml:"sync_compaction"`
 }
 
 // EffectiveContextAbsoluteMaxTokens resolves the server-wide context
@@ -247,6 +256,28 @@ const (
 	ContextLoopReselectModeShadow = "shadow"
 	ContextLoopReselectModeOff    = "off"
 )
+
+const (
+	SyncCompactionModeActive = "active"
+	SyncCompactionModeShadow = "shadow"
+	SyncCompactionModeOff    = "off"
+)
+
+// EffectiveSyncCompactionMode normalizes the pre-turn synchronous compaction
+// rollout mode. Empty defaults to shadow (observe before enforcing, per the
+// CM-CMP-003 rollout gate). recognized is false when a non-empty value does
+// not match active/shadow/off.
+func (c AgentConfig) EffectiveSyncCompactionMode() (mode string, recognized bool) {
+	value := strings.TrimSpace(strings.ToLower(c.SyncCompaction))
+	switch value {
+	case "":
+		return SyncCompactionModeShadow, true
+	case SyncCompactionModeActive, SyncCompactionModeShadow, SyncCompactionModeOff:
+		return value, true
+	default:
+		return SyncCompactionModeShadow, false
+	}
+}
 
 // EffectiveContextLoopReselectMode normalizes the configured in-loop context
 // step reselector rollout mode. Empty defaults to active. recognized is false
@@ -443,7 +474,9 @@ type ContainerdConfig struct {
 }
 
 type DockerConfig struct {
-	Host string `toml:"host"`
+	Host            string `toml:"host"`
+	Network         string `toml:"network"`
+	ServerContainer string `toml:"server_container"`
 }
 
 type AppleConfig struct {
@@ -882,6 +915,9 @@ func (cfg *Config) applyBridgeTLSEnvOverrides() {
 	}
 	if value := strings.TrimSpace(os.Getenv("MEMOH_INTERNAL_RPC_SHARED_SECRET")); value != "" {
 		cfg.InternalRPC.SharedSecret = value
+	}
+	if value := strings.TrimSpace(os.Getenv("MEMOH_AGENT_CREDENTIALS_ENCRYPTION_KEY")); value != "" {
+		cfg.Auth.AgentCredentialsEncryptionKey = value
 	}
 	if value := strings.TrimSpace(os.Getenv("MEMOH_INTERNAL_RPC_SERVER_TARGET")); value != "" {
 		cfg.InternalRPC.ServerTarget = value

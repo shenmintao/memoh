@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -21,7 +22,7 @@ import (
 type abortLifecycleQueries struct {
 	dbstore.Queries
 	mu            sync.Mutex
-	existing      *sqlc.ContextLifecycle
+	existing      *sqlc.GetContextLifecycleByRunIDRow
 	existingAfter int
 	getCalls      int
 	assistantID   pgtype.UUID
@@ -40,19 +41,19 @@ type abortLifecycleQueries struct {
 func (*abortLifecycleQueries) CreateContextLifecycle(
 	context.Context,
 	sqlc.CreateContextLifecycleParams,
-) (sqlc.ContextLifecycle, error) {
-	return sqlc.ContextLifecycle{}, errors.New("unexpected lifecycle create")
+) (sqlc.CreateContextLifecycleRow, error) {
+	return sqlc.CreateContextLifecycleRow{}, errors.New("unexpected lifecycle create")
 }
 
 func (q *abortLifecycleQueries) GetContextLifecycleByRunID(
 	context.Context,
 	pgtype.UUID,
-) (sqlc.ContextLifecycle, error) {
+) (sqlc.GetContextLifecycleByRunIDRow, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.getCalls++
 	if q.existing == nil || q.existingAfter > 0 && q.getCalls < q.existingAfter {
-		return sqlc.ContextLifecycle{}, pgx.ErrNoRows
+		return sqlc.GetContextLifecycleByRunIDRow{}, pgx.ErrNoRows
 	}
 	return *q.existing, nil
 }
@@ -93,14 +94,14 @@ func (q *abortLifecycleQueries) GetLatestAssistantContextLifecycleByRunID(
 func (*abortLifecycleQueries) UpdateAbortedContextLifecycleSnapshot(
 	context.Context,
 	sqlc.UpdateAbortedContextLifecycleSnapshotParams,
-) (sqlc.ContextLifecycle, error) {
-	return sqlc.ContextLifecycle{}, errors.New("unexpected lifecycle update")
+) (sqlc.UpdateAbortedContextLifecycleSnapshotRow, error) {
+	return sqlc.UpdateAbortedContextLifecycleSnapshotRow{}, errors.New("unexpected lifecycle update")
 }
 
 func (q *abortLifecycleQueries) UpsertAbortedContextLifecycle(
 	_ context.Context,
 	arg sqlc.UpsertAbortedContextLifecycleParams,
-) (sqlc.ContextLifecycle, error) {
+) (sqlc.UpsertAbortedContextLifecycleRow, error) {
 	q.mu.Lock()
 	q.upserts = append(q.upserts, arg)
 	q.mu.Unlock()
@@ -110,7 +111,7 @@ func (q *abortLifecycleQueries) UpsertAbortedContextLifecycle(
 		default:
 		}
 	}
-	return sqlc.ContextLifecycle{}, q.upsertErr
+	return sqlc.UpsertAbortedContextLifecycleRow{}, q.upsertErr
 }
 
 func (q *abortLifecycleQueries) GetSessionRun(context.Context, pgtype.UUID) (sqlc.SessionRun, error) {
@@ -119,24 +120,24 @@ func (q *abortLifecycleQueries) GetSessionRun(context.Context, pgtype.UUID) (sql
 	return q.sessionRun, q.sessionRunErr
 }
 
-func (q *abortLifecycleQueries) GetPendingToolApprovalByRun(
+func (q *abortLifecycleQueries) ListPendingToolApprovalsByRun(
 	context.Context,
 	pgtype.UUID,
-) (sqlc.ToolApprovalRequest, error) {
+) ([]sqlc.ToolApprovalRequest, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.pendingReads++
 	if !q.pending || q.pendingUntil > 0 && q.pendingReads > q.pendingUntil {
-		return sqlc.ToolApprovalRequest{}, pgx.ErrNoRows
+		return nil, nil
 	}
-	return sqlc.ToolApprovalRequest{}, nil
+	return []sqlc.ToolApprovalRequest{{}}, nil
 }
 
-func (*abortLifecycleQueries) GetPendingUserInputByRun(
+func (*abortLifecycleQueries) ListPendingUserInputsByRun(
 	context.Context,
 	pgtype.UUID,
-) (sqlc.UserInputRequest, error) {
-	return sqlc.UserInputRequest{}, pgx.ErrNoRows
+) ([]sqlc.UserInputRequest, error) {
+	return nil, nil
 }
 
 func (q *abortLifecycleQueries) recordedUpserts() []sqlc.UpsertAbortedContextLifecycleParams {
@@ -220,8 +221,18 @@ func TestAbortRuntimeRunReconcilesAssistantLifecycleWithoutChangingAck(t *testin
 			}
 			waitForAbortedLifecycleUpsert(t, queries)
 			upserts := queries.recordedUpserts()
-			if len(upserts) != 1 || !bytes.Equal(upserts[0].Snapshot, wantRaw) {
-				t.Fatalf("aborted upserts = %#v, want recovered snapshot %s", upserts, wantRaw)
+			if len(upserts) != 1 {
+				t.Fatalf("aborted upserts = %#v, want one recovered snapshot", upserts)
+			}
+			var gotFields, wantFields map[string]any
+			if err := json.Unmarshal(upserts[0].Snapshot, &gotFields); err != nil {
+				t.Fatalf("decode recovered snapshot: %v", err)
+			}
+			if err := json.Unmarshal(wantRaw, &wantFields); err != nil {
+				t.Fatalf("decode expected snapshot: %v", err)
+			}
+			if !reflect.DeepEqual(gotFields, wantFields) {
+				t.Fatalf("recovered snapshot = %s, want %s", upserts[0].Snapshot, wantRaw)
 			}
 			waitForLifecycleFailureCount(t, service, tt.wantFailureCount)
 		})
@@ -304,7 +315,7 @@ func TestAbortRuntimeRunFallsBackToMinimalAfterPendingDecisionGrace(t *testing.T
 
 func TestAbortRuntimeRunPrefersExistingAuthoritativeSnapshot(t *testing.T) {
 	queries := newAbortedLifecycleQueries(t)
-	queries.existing = &sqlc.ContextLifecycle{Snapshot: []byte(`{"version":7}`)}
+	queries.existing = &sqlc.GetContextLifecycleByRunIDRow{Snapshot: []byte(`{"version":7}`)}
 	service := &Service{
 		queries:           queries,
 		contextLifecycles: queries,

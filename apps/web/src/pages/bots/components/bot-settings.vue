@@ -392,7 +392,7 @@ watch(settings, (val) => {
   if (!val) return
   const next = {
     chat_model_id: val.chat_model_id ?? '',
-    chat_runtime: (val as SettingsForm).chat_runtime === 'acp_agent' ? 'acp_agent' : 'model',
+    chat_runtime: (val as SettingsForm).chat_runtime || 'model',
     chat_acp_agent_id: (val as SettingsForm).chat_acp_agent_id ?? '',
     chat_acp_project_path: (val as SettingsForm).chat_acp_project_path || '/data',
     chat_acp_project_mode: (val as SettingsForm).chat_acp_project_mode || 'project',

@@ -13,11 +13,27 @@ import {
   patchBotsByBotIdAcpRuntimesByRuntimeIdMode,
   patchBotsByBotIdAcpRuntimesByRuntimeIdReasoning,
   patchBotsByBotIdSessionsBySessionId,
+  getBotsByBotIdSessionsModelPreferenceSeed,
   patchBotsByBotIdSessionsBySessionIdAcpRuntimeMode,
   patchBotsByBotIdSessionsBySessionIdAcpRuntimeModel,
   patchBotsByBotIdSessionsBySessionIdAcpRuntimeReasoning,
+  getBotsByBotIdSessionsBySessionIdQueue,
+  postBotsByBotIdSessionsBySessionIdSteerQueue,
+  postBotsByBotIdSessionsBySessionIdFollowUpQueue,
+  postBotsByBotIdSessionsBySessionIdFollowUpQueueByItemIdSteer,
+  putBotsByBotIdSessionsBySessionIdSteerQueueReorder,
+  putBotsByBotIdSessionsBySessionIdFollowUpQueueReorder,
+  patchBotsByBotIdSessionsBySessionIdSteerQueueByItemId,
+  patchBotsByBotIdSessionsBySessionIdFollowUpQueueByItemId,
+  deleteBotsByBotIdSessionsBySessionIdSteerQueueByItemId,
+  deleteBotsByBotIdSessionsBySessionIdFollowUpQueueByItemId,
 } from '@memohai/sdk'
-import type { AcpagentRuntimeStatus } from '@memohai/sdk'
+import type {
+  AcpagentRuntimeStatus,
+  HandlersFollowUpQueueItemResponse,
+  HandlersSessionQueueResponse,
+  HandlersSteerQueueItemResponse,
+} from '@memohai/sdk'
 import type { Bot, SessionSummary } from './useChat.types'
 
 export interface CreateSessionOptions {
@@ -35,11 +51,112 @@ export interface CreateSessionOptions {
    * workdir pins the session's workspace target and working directory.
    */
   workdirId?: string
+  /**
+   * First-send picker pair (issue #879). Carried only when the pair has an
+   * explicit source (user pick / remembered session); when omitted the
+   * session is born with NULL preference columns and follows the bot default.
+   * The server reconciles both before the INSERT.
+   */
+  preferredChatModelId?: string
+  preferredReasoningEffort?: string
 }
 
 export interface CreateACPRuntimeOptions {
   agentId: string
   projectPath?: string
+}
+
+/**
+ * The two queues share one wire shape for the fields the composer renders.
+ * The server keeps them as separate response types; the union here is only a
+ * read-side convenience and never crosses back into a request.
+ */
+export type SessionQueueItem = Pick<
+  HandlersSteerQueueItemResponse & HandlersFollowUpQueueItemResponse,
+  'item_id' | 'status' | 'position' | 'text'
+>
+
+export type SessionQueuesResponse = HandlersSessionQueueResponse
+
+export function queueItemText(item: SessionQueueItem): string {
+  return item.text ?? ''
+}
+
+const queuePath = (botId: string, sessionId: string) => ({ bot_id: botId.trim(), session_id: sessionId.trim() })
+
+export async function enqueueSteerQueue(botId: string, sessionId: string, text: string, invocationId = crypto.randomUUID()): Promise<SessionQueueItem> {
+  const { data } = await postBotsByBotIdSessionsBySessionIdSteerQueue({
+    path: queuePath(botId, sessionId),
+    body: { invocation_id: invocationId, text },
+    throwOnError: true,
+  })
+  return data
+}
+
+export async function fetchSessionQueues(botId: string, sessionId: string): Promise<SessionQueuesResponse> {
+  const { data } = await getBotsByBotIdSessionsBySessionIdQueue({ path: queuePath(botId, sessionId), throwOnError: true })
+  return data ?? {}
+}
+
+export async function enqueueFollowUpQueue(botId: string, sessionId: string, text: string, invocationId = crypto.randomUUID()): Promise<SessionQueueItem> {
+  const { data } = await postBotsByBotIdSessionsBySessionIdFollowUpQueue({
+    path: queuePath(botId, sessionId),
+    body: { invocation_id: invocationId, text },
+    throwOnError: true,
+  })
+  return data
+}
+
+export async function promoteFollowUpQueueItemToSteer(botId: string, sessionId: string, itemId: string): Promise<SessionQueueItem> {
+  const { data } = await postBotsByBotIdSessionsBySessionIdFollowUpQueueByItemIdSteer({
+    path: { ...queuePath(botId, sessionId), item_id: itemId.trim() },
+    throwOnError: true,
+  })
+  return data
+}
+
+export async function updateSteerQueueItem(botId: string, sessionId: string, itemId: string, text: string): Promise<SessionQueueItem> {
+  const { data } = await patchBotsByBotIdSessionsBySessionIdSteerQueueByItemId({
+    path: { ...queuePath(botId, sessionId), item_id: itemId.trim() },
+    body: { text },
+    throwOnError: true,
+  })
+  return data
+}
+
+export async function updateFollowUpQueueItem(botId: string, sessionId: string, itemId: string, text: string): Promise<SessionQueueItem> {
+  const { data } = await patchBotsByBotIdSessionsBySessionIdFollowUpQueueByItemId({
+    path: { ...queuePath(botId, sessionId), item_id: itemId.trim() },
+    body: { text },
+    throwOnError: true,
+  })
+  return data
+}
+
+export async function deleteSteerQueueItem(botId: string, sessionId: string, itemId: string): Promise<void> {
+  await deleteBotsByBotIdSessionsBySessionIdSteerQueueByItemId({ path: { ...queuePath(botId, sessionId), item_id: itemId.trim() }, throwOnError: true })
+}
+
+export async function deleteFollowUpQueueItem(botId: string, sessionId: string, itemId: string): Promise<void> {
+  await deleteBotsByBotIdSessionsBySessionIdFollowUpQueueByItemId({ path: { ...queuePath(botId, sessionId), item_id: itemId.trim() }, throwOnError: true })
+}
+
+export async function reorderSteerQueue(botId: string, sessionId: string, itemId: string, beforeId: string): Promise<SessionQueueItem[]> {
+  const { data } = await putBotsByBotIdSessionsBySessionIdSteerQueueReorder({
+    path: queuePath(botId, sessionId),
+    body: { item: { item_id: itemId }, before: { item_id: beforeId } },
+    throwOnError: true,
+  })
+  return data?.items ?? []
+}
+
+export async function reorderFollowUpQueue(botId: string, sessionId: string, itemId: string, beforeId: string): Promise<SessionQueueItem[]> {
+  const { data } = await putBotsByBotIdSessionsBySessionIdFollowUpQueueReorder({
+    path: queuePath(botId, sessionId),
+    body: { item: { item_id: itemId }, before: { item_id: beforeId } },
+    throwOnError: true,
+  })
+  return data?.items ?? []
 }
 
 export async function fetchBots(): Promise<Bot[]> {
@@ -117,6 +234,8 @@ export async function createSession(botId: string, options?: string | CreateSess
         runtime_metadata: options?.runtimeMetadata,
         acp_runtime_id: options?.acpRuntimeId?.trim() || undefined,
         workdir_id: options?.workdirId?.trim() || undefined,
+        preferred_chat_model_id: options?.preferredChatModelId?.trim() || undefined,
+        preferred_reasoning_effort: options?.preferredReasoningEffort?.trim() || undefined,
       }
   const { data } = await postBotsByBotIdSessions({
     path: { bot_id: id },
@@ -156,6 +275,38 @@ export async function updateSessionTitle(botId: string, sessionId: string, title
     throwOnError: true,
   })
   return data as SessionSummary
+}
+
+// Picker pair persistence (issue #879): best-effort PATCH from the composer.
+// The caller treats failures as silent — the next sent message writes the
+// resolved pair back server-side, so a dropped PATCH only loses the
+// pick-until-send window.
+export async function updateSessionModelPreference(botId: string, sessionId: string, modelId: string, reasoningEffort: string, expectedRevision: string): Promise<SessionSummary> {
+  const { data } = await patchBotsByBotIdSessionsBySessionId({
+    path: { bot_id: botId.trim(), session_id: sessionId.trim() },
+    body: {
+      expected_model_preference_revision: expectedRevision,
+      preferred_chat_model_id: modelId,
+      preferred_reasoning_effort: reasoningEffort,
+    },
+    throwOnError: true,
+  })
+  return data as SessionSummary
+}
+
+export interface ModelPreferenceSeed {
+  model_id?: string
+  reasoning_effort?: string
+}
+
+// Welcome composer seed (issue #879): the pair of the bot's most recent
+// native session. Empty fields mean "no seed" — fall back to the bot default.
+export async function fetchModelPreferenceSeed(botId: string): Promise<ModelPreferenceSeed> {
+  const { data } = await getBotsByBotIdSessionsModelPreferenceSeed({
+    path: { bot_id: botId.trim() },
+    throwOnError: true,
+  })
+  return data as ModelPreferenceSeed
 }
 
 export interface UpdateSessionAgentOptions {

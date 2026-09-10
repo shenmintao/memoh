@@ -11,84 +11,116 @@ import (
 type Code string
 
 const (
-	CodeBotNameTaken                     Code = "bot.name_taken"
-	CodeBotAgentNotFound                 Code = "bot_agent.not_found"
-	CodeBotAgentNameTaken                Code = "bot_agent.name_taken"
-	CodeBotAgentInvalidRuntime           Code = "bot_agent.invalid_runtime"
-	CodeBotAgentInvalidMetadata          Code = "bot_agent.invalid_metadata"
-	CodeBotAgentDefaultInUse             Code = "bot_agent.default_in_use"
-	CodeBotAgentUnavailable              Code = "bot_agent.unavailable"
-	CodeChannelRuntimeUnavailable        Code = "channel.runtime_unavailable"
-	CodeCompactionModelUnavailable       Code = "compaction.model_unavailable"
-	CodeSettingsReasoningEffortInvalid   Code = "settings.reasoning_effort_invalid"
-	CodeSettingsReasoningUnavailable     Code = "settings.reasoning_options_unavailable"
-	CodeContextBudgetUnsatisfied         Code = "context.budget_unsatisfied"
-	CodeContextProtectedOverflow         Code = "context.protected_overflow"
-	CodeWorkspaceUnreachable             Code = "workspace.unreachable"
-	CodeWorkspaceImageIncompatible       Code = "workspace.image_incompatible"
-	CodeWorkspaceTemplateBootstrapFailed Code = "workspace.template_bootstrap_failed"
-	CodeWorkspaceDisplayPrepareFailed    Code = "workspace.display_prepare_failed"
-	CodeProviderTemplateNotFound         Code = "provider_template.not_found"
-	CodeProviderTemplateDomainInvalid    Code = "provider_template.domain_invalid"
-	CodeProviderTemplateDomainMismatch   Code = "provider_template.domain_mismatch"
-	CodeProviderTemplateOperationFailed  Code = "provider_template.operation_failed"
-	CodeProviderNameTaken                Code = "provider.name_taken"
-	CodeProviderTemplateRequestInvalid   Code = "provider_template.request_invalid"
-	CodeSearchProviderTypeConflict       Code = "search_provider.type_conflict"
-	CodeConnectorRequestInvalid          Code = "connector.request_invalid"
-	CodeConnectorNotConfigured           Code = "connector.not_configured"
-	CodeConnectorNotFound                Code = "connector.not_found"
-	CodeConnectorConflict                Code = "connector.conflict"
-	CodeConnectorRequestRejected         Code = "connector.request_rejected"
-	CodeConnectorUpstreamUnavailable     Code = "connector.upstream_unavailable"
-	CodeConnectorOperationFailed         Code = "connector.operation_failed"
-	CodeSkillBuiltinReadOnly             Code = "skill.builtin_read_only"
-	CodeSkillNameTaken                   Code = "skill.name_taken"
-	CodeSkillSaveFailed                  Code = "skill.save_failed"
-	CodeRegistryUnavailable              Code = "registry.unavailable"
-	CodeRegistryPackageNotFound          Code = "registry.package_not_found"
-	CodeRegistryPackageInvalid           Code = "registry.package_invalid"
-	CodeRegistryPackageInstallFailed     Code = "registry.package_install_failed"
-	CodeProfileRequestInvalid            Code = "profile.request_invalid"
-	CodeProfileTitleModelInvalid         Code = "profile.title_model_invalid"
-	CodeProfileUpdateFailed              Code = "profile.update_failed"
-	CodeACPRequestInvalid                Code = "acp.request_invalid"
-	CodeACPAccessForbidden               Code = "acp.access_forbidden"
-	CodeACPRuntimeNotFound               Code = "acp.runtime_not_found"
-	CodeACPRuntimeConflict               Code = "acp.runtime_conflict"
-	CodeACPRuntimeLimitReached           Code = "acp.runtime_limit_reached"
-	CodeACPOperationFailed               Code = "acp.operation_failed"
-	CodeACPTurnReplacementUnsupported    Code = "acp.turn_replacement_unsupported"
-	CodeACPModelSelectionUnsupported     Code = "acp.model_selection_unsupported"
-	CodeACPModelIDRequired               Code = "acp.model_id_required"
-	CodeACPModelUnavailable              Code = "acp.model_unavailable"
-	CodeACPReasoningUnsupported          Code = "acp.reasoning_selection_unsupported"
-	CodeACPReasoningEffortRequired       Code = "acp.reasoning_effort_required"
-	CodeACPReasoningUnavailable          Code = "acp.reasoning_effort_unavailable"
-	CodeACPModeSelectionUnsupported      Code = "acp.mode_selection_unsupported"
-	CodeACPModeIDRequired                Code = "acp.mode_id_required"
-	CodeACPModeUnavailable               Code = "acp.mode_unavailable"
-	CodeACPConfigUpdateFailed            Code = "acp.config_update_failed"
-	CodeToolApprovalForbidden            Code = "tool_approval.forbidden"
-	CodeToolApprovalNotFound             Code = "tool_approval.not_found"
-	CodeToolApprovalExpired              Code = "tool_approval.expired"
-	CodeToolApprovalAmbiguous            Code = "tool_approval.ambiguous"
-	CodeToolApprovalRequestInvalid       Code = "tool_approval.request_invalid"
-	CodeToolApprovalOperationFailed      Code = "tool_approval.operation_failed"
-	CodeUserInputForbidden               Code = "user_input.forbidden"
-	CodeUserInputExpired                 Code = "user_input.expired"
-	CodeUserInputOperationFailed         Code = "user_input.operation_failed"
-	CodeSessionBusy                      Code = "session_runtime.session_busy"
-	CodeSessionInvocationConflict        Code = "session_runtime.invocation_conflict"
-	CodeSessionHistoryInconsistent       Code = "session_runtime.history_inconsistent"
-	CodeAgentResponseTimeout             Code = "agent.response_timeout"
-	CodeAgentResponseInterrupted         Code = "agent.response_interrupted"
+	CodeWorkspaceDependencyDiscoveryFailed       Code = "workspace_dependency.discovery_failed"
+	CodeWorkspaceDependencyDefinitionUnavailable Code = "workspace_dependency.definition_unavailable"
+	CodeWorkspaceDependencyDefinitionInvalid     Code = "workspace_dependency.definition_invalid"
+	CodeWorkspaceDependencyCatalogUnavailable    Code = "workspace_dependency.catalog_unavailable"
+	CodeBotNameTaken                             Code = "bot.name_taken"
+	CodeBotAgentNotFound                         Code = "bot_agent.not_found"
+	CodeBotAgentNameTaken                        Code = "bot_agent.name_taken"
+	CodeBotAgentInvalidRuntime                   Code = "bot_agent.invalid_runtime"
+	CodeBotAgentInvalidMetadata                  Code = "bot_agent.invalid_metadata"
+	CodeBotAgentDefaultInUse                     Code = "bot_agent.default_in_use"
+	CodeBotAgentUnavailable                      Code = "bot_agent.unavailable"
+	CodeChannelRuntimeUnavailable                Code = "channel.runtime_unavailable"
+	CodeCompactionModelUnavailable               Code = "compaction.model_unavailable"
+	CodeSettingsReasoningEffortInvalid           Code = "settings.reasoning_effort_invalid"
+	CodeSettingsReasoningUnavailable             Code = "settings.reasoning_options_unavailable"
+	CodeContextBudgetUnsatisfied                 Code = "context.budget_unsatisfied"
+	CodeContextProtectedOverflow                 Code = "context.protected_overflow"
+	CodeWorkspaceUnreachable                     Code = "workspace.unreachable"
+	CodeWorkspaceTemplateBootstrapFailed         Code = "workspace.template_bootstrap_failed"
+	CodeWorkspaceDisplayPrepareFailed            Code = "workspace.display_prepare_failed"
+	CodeWorkspaceDependencyNotFound              Code = "workspace_dependency.not_found"
+	CodeWorkspaceDependencyRequestInvalid        Code = "workspace_dependency.request_invalid"
+	CodeWorkspaceDependencyActionUnsupported     Code = "workspace_dependency.action_unsupported"
+	CodeWorkspaceDependencyPlatformUnsupported   Code = "workspace_dependency.platform_unsupported"
+	CodeWorkspaceDependencyBusy                  Code = "workspace_dependency.busy"
+	CodeWorkspaceDependencyWorkspaceNotRunning   Code = "workspace_dependency.workspace_not_running"
+	CodeWorkspaceDependencyWorkspaceMissing      Code = "workspace_dependency.workspace_missing"
+	CodeWorkspaceDependencyRemoteOffline         Code = "workspace_dependency.remote_offline"
+	CodeWorkspaceDependencyRollbackUnavailable   Code = "workspace_dependency.rollback_unavailable"
+	CodeWorkspaceDependencyOperationFailed       Code = "workspace_dependency.operation_failed"
+	CodeProviderTemplateNotFound                 Code = "provider_template.not_found"
+	CodeProviderTemplateDomainInvalid            Code = "provider_template.domain_invalid"
+	CodeProviderTemplateDomainMismatch           Code = "provider_template.domain_mismatch"
+	CodeProviderTemplateOperationFailed          Code = "provider_template.operation_failed"
+	CodeProviderNameTaken                        Code = "provider.name_taken"
+	CodeProviderTemplateRequestInvalid           Code = "provider_template.request_invalid"
+	CodeSearchProviderTypeConflict               Code = "search_provider.type_conflict"
+	CodeConnectorRequestInvalid                  Code = "connector.request_invalid"
+	CodeConnectorNotConfigured                   Code = "connector.not_configured"
+	CodeConnectorNotFound                        Code = "connector.not_found"
+	CodeConnectorConflict                        Code = "connector.conflict"
+	CodeConnectorRequestRejected                 Code = "connector.request_rejected"
+	CodeConnectorUpstreamUnavailable             Code = "connector.upstream_unavailable"
+	CodeConnectorOperationFailed                 Code = "connector.operation_failed"
+	CodeSkillBuiltinReadOnly                     Code = "skill.builtin_read_only"
+	CodeSkillNameTaken                           Code = "skill.name_taken"
+	CodeSkillSaveFailed                          Code = "skill.save_failed"
+	CodeRegistryUnavailable                      Code = "registry.unavailable"
+	CodeRegistryPackageNotFound                  Code = "registry.package_not_found"
+	CodeRegistryPackageInvalid                   Code = "registry.package_invalid"
+	CodeRegistryPackageInstallFailed             Code = "registry.package_install_failed"
+	CodeProfileRequestInvalid                    Code = "profile.request_invalid"
+	CodeProfileTitleModelInvalid                 Code = "profile.title_model_invalid"
+	CodeProfileUpdateFailed                      Code = "profile.update_failed"
+	CodeACPRequestInvalid                        Code = "acp.request_invalid"
+	CodeACPAccessForbidden                       Code = "acp.access_forbidden"
+	CodeACPRuntimeNotFound                       Code = "acp.runtime_not_found"
+	CodeACPRuntimeConflict                       Code = "acp.runtime_conflict"
+	CodeACPRuntimeLimitReached                   Code = "acp.runtime_limit_reached"
+	CodeACPOperationFailed                       Code = "acp.operation_failed"
+	CodeExternalAgentTurnReplacementUnsupported  Code = "external_agent.turn_replacement_unsupported"
+	CodeACPModelSelectionUnsupported             Code = "acp.model_selection_unsupported"
+	CodeACPModelIDRequired                       Code = "acp.model_id_required"
+	CodeACPModelUnavailable                      Code = "acp.model_unavailable"
+	CodeACPReasoningUnsupported                  Code = "acp.reasoning_selection_unsupported"
+	CodeACPReasoningEffortRequired               Code = "acp.reasoning_effort_required"
+	CodeACPReasoningUnavailable                  Code = "acp.reasoning_effort_unavailable"
+	CodeACPModeSelectionUnsupported              Code = "acp.mode_selection_unsupported"
+	CodeACPModeIDRequired                        Code = "acp.mode_id_required"
+	CodeACPModeUnavailable                       Code = "acp.mode_unavailable"
+	CodeACPConfigUpdateFailed                    Code = "acp.config_update_failed"
+	CodeExternalRuntimeAuthRequired              Code = "external_runtime.auth_required"
+	CodeExternalRuntimeUnavailable               Code = "external_runtime.unavailable"
+	CodeToolApprovalForbidden                    Code = "tool_approval.forbidden"
+	CodeToolApprovalNotFound                     Code = "tool_approval.not_found"
+	CodeToolApprovalExpired                      Code = "tool_approval.expired"
+	CodeToolApprovalAmbiguous                    Code = "tool_approval.ambiguous"
+	CodeToolApprovalRequestInvalid               Code = "tool_approval.request_invalid"
+	CodeToolApprovalOperationFailed              Code = "tool_approval.operation_failed"
+	CodeUserInputForbidden                       Code = "user_input.forbidden"
+	CodeUserInputExpired                         Code = "user_input.expired"
+	CodeUserInputOperationFailed                 Code = "user_input.operation_failed"
+	CodeSessionModelPreferenceConflict           Code = "session.model_preference_conflict"
+	CodeSessionBusy                              Code = "session_runtime.session_busy"
+	CodeSessionInvocationConflict                Code = "session_runtime.invocation_conflict"
+	CodeSessionHistoryInconsistent               Code = "session_runtime.history_inconsistent"
+	CodeAgentResponseTimeout                     Code = "agent.response_timeout"
+	CodeAgentResponseInterrupted                 Code = "agent.response_interrupted"
+	CodeQueueNoActiveRun                         Code = "queue_no_active_run"
+	CodeQueueAdmissionOverloaded                 Code = "queue_admission_overloaded"
+	CodeQueueAdmissionUnavailable                Code = "queue_admission_unavailable"
+	CodeQueueRequestInvalid                      Code = "queue_request_invalid"
+	CodeQueueItemNotPending                      Code = "queue_item_not_pending"
+	CodeQueueCapacityExceeded                    Code = "queue_capacity_exceeded"
+	CodeQueueSteerUnsupported                    Code = "queue.steer_unsupported"
 
 	CodeContextLifecycleRequestInvalid         Code = "context_lifecycle.request_invalid"
 	CodeContextLifecycleAuthenticationRequired Code = "context_lifecycle.authentication_required"
 	CodeContextLifecycleAccessDenied           Code = "context_lifecycle.access_denied"
 	CodeContextLifecycleNotFound               Code = "context_lifecycle.not_found"
 	CodeContextLifecycleLoadFailed             Code = "context_lifecycle.load_failed"
+	CodeAgentCredentialNotFound                Code = "agent_credential.not_found"                //nolint:gosec // Stable public error code.
+	CodeAgentCredentialRequestInvalid          Code = "agent_credential.request_invalid"          //nolint:gosec // Stable public error code.
+	CodeAgentCredentialForbidden               Code = "agent_credential.forbidden"                //nolint:gosec // Stable public error code.
+	CodeAgentCredentialIncompatible            Code = "agent_credential.incompatible"             //nolint:gosec // Stable public error code.
+	CodeAgentCredentialRevoked                 Code = "agent_credential.revoked"                  //nolint:gosec // Stable public error code.
+	CodeAgentCredentialReauthRequired          Code = "agent_credential.reauthorization_required" //nolint:gosec // Stable public error code.
+	CodeAgentCredentialEncryptionUnavailable   Code = "agent_credential.encryption_unavailable"   //nolint:gosec // Stable public error code.
+	CodeAgentCredentialRuntimeBusy             Code = "agent_credential.runtime_busy"             //nolint:gosec // Stable public error code.
+	CodeAgentCredentialMaterializationFailed   Code = "agent_credential.materialization_failed"   //nolint:gosec // Stable public error code.
 )
 
 // Definition is the single catalog entry for a public error contract.
@@ -103,6 +135,42 @@ type Definition struct {
 // clients; the localized copies live under errors.* in
 // apps/web/src/i18n/locales/{en,zh,ja}.json. Keep both sides in sync.
 var catalog = map[Code]Definition{
+	CodeAgentCredentialNotFound: {
+		HTTPStatus: http.StatusNotFound,
+		Detail:     "The Agent credential was not found.",
+	},
+	CodeAgentCredentialRequestInvalid: {
+		HTTPStatus: http.StatusBadRequest,
+		Detail:     "The Agent credential request is invalid.",
+	},
+	CodeAgentCredentialForbidden: {
+		HTTPStatus: http.StatusForbidden,
+		Detail:     "You cannot use this Agent credential.",
+	},
+	CodeAgentCredentialIncompatible: {
+		HTTPStatus: http.StatusUnprocessableEntity,
+		Detail:     "This credential is not compatible with the selected Agent.",
+	},
+	CodeAgentCredentialRevoked: {
+		HTTPStatus: http.StatusConflict,
+		Detail:     "This Agent credential has been revoked.",
+	},
+	CodeAgentCredentialReauthRequired: {
+		HTTPStatus: http.StatusConflict,
+		Detail:     "This Agent credential needs to be connected again.",
+	},
+	CodeAgentCredentialEncryptionUnavailable: {
+		HTTPStatus: http.StatusServiceUnavailable,
+		Detail:     "Agent credential storage is not configured on this server.",
+	},
+	CodeAgentCredentialRuntimeBusy: {
+		HTTPStatus: http.StatusConflict,
+		Detail:     "The Agent credential cannot be changed while the Agent is running.",
+	},
+	CodeAgentCredentialMaterializationFailed: {
+		HTTPStatus: http.StatusInternalServerError,
+		Detail:     "The Agent credential could not be prepared for this runtime.",
+	},
 	CodeBotNameTaken: {
 		HTTPStatus:  http.StatusConflict,
 		Detail:      "This name is already taken.",
@@ -153,19 +221,15 @@ var catalog = map[Code]Definition{
 	},
 	CodeContextBudgetUnsatisfied: {
 		HTTPStatus: http.StatusUnprocessableEntity,
-		Detail:     "The model context window is too small for this request.",
+		Detail:     "The model context window is too small for this request. Run /compact to summarize older history, shorten the request, or switch to a model with a larger context window.",
 	},
 	CodeContextProtectedOverflow: {
 		HTTPStatus: http.StatusUnprocessableEntity,
-		Detail:     "Required context exceeds the model context budget.",
+		Detail:     "Required context exceeds the model context budget. Run /compact to summarize older history, or switch to a model with a larger context window.",
 	},
 	CodeWorkspaceUnreachable: {
 		HTTPStatus: http.StatusServiceUnavailable,
 		Detail:     "The workspace could not be reached.",
-	},
-	CodeWorkspaceImageIncompatible: {
-		HTTPStatus: http.StatusUnprocessableEntity,
-		Detail:     "The workspace image is incompatible with this version of Memoh.",
 	},
 	CodeWorkspaceTemplateBootstrapFailed: {
 		HTTPStatus: http.StatusInternalServerError,
@@ -176,6 +240,54 @@ var catalog = map[Code]Definition{
 	CodeWorkspaceDisplayPrepareFailed: {
 		HTTPStatus: http.StatusInternalServerError,
 		Detail:     "Display preparation failed.",
+	},
+	// Workspace dependencies (design docs/design/workspace-dependencies.md
+	// §11). The 409 family tells the UI what to offer instead: start or
+	// create the workspace, wait for the other operation, bring the remote
+	// computer online.
+	CodeWorkspaceDependencyDiscoveryFailed:       {HTTPStatus: http.StatusServiceUnavailable, Detail: "Workspace dependencies could not be inspected. Please try again."},
+	CodeWorkspaceDependencyCatalogUnavailable:    {HTTPStatus: http.StatusServiceUnavailable, Detail: "The dependency catalog is unavailable. Please try again later."},
+	CodeWorkspaceDependencyDefinitionInvalid:     {HTTPStatus: http.StatusBadGateway, Detail: "The dependency definition could not be verified. Please refresh the catalog."},
+	CodeWorkspaceDependencyDefinitionUnavailable: {HTTPStatus: http.StatusServiceUnavailable, Detail: "The dependency definition is not cached. Please reconnect to Supermarket and try again."},
+	CodeWorkspaceDependencyNotFound: {
+		HTTPStatus: http.StatusNotFound,
+		Detail:     "This dependency does not exist.",
+	},
+	CodeWorkspaceDependencyRequestInvalid: {
+		HTTPStatus: http.StatusBadRequest,
+		Detail:     "The dependency request is invalid.",
+	},
+	CodeWorkspaceDependencyActionUnsupported: {
+		HTTPStatus: http.StatusUnprocessableEntity,
+		Detail:     "This action is not available for the dependency.",
+	},
+	CodeWorkspaceDependencyPlatformUnsupported: {
+		HTTPStatus: http.StatusUnprocessableEntity,
+		Detail:     "This dependency is not available on the workspace platform.",
+	},
+	CodeWorkspaceDependencyBusy: {
+		HTTPStatus: http.StatusConflict,
+		Detail:     "Another operation on this dependency is in progress.",
+	},
+	CodeWorkspaceDependencyWorkspaceNotRunning: {
+		HTTPStatus: http.StatusConflict,
+		Detail:     "The workspace is not running. Start it first.",
+	},
+	CodeWorkspaceDependencyWorkspaceMissing: {
+		HTTPStatus: http.StatusConflict,
+		Detail:     "The workspace has not been created yet.",
+	},
+	CodeWorkspaceDependencyRemoteOffline: {
+		HTTPStatus: http.StatusConflict,
+		Detail:     "That computer is offline.",
+	},
+	CodeWorkspaceDependencyRollbackUnavailable: {
+		HTTPStatus: http.StatusConflict,
+		Detail:     "No previous version to roll back to.",
+	},
+	CodeWorkspaceDependencyOperationFailed: {
+		HTTPStatus: http.StatusInternalServerError,
+		Detail:     "The dependency operation failed.",
 	},
 	CodeProviderTemplateNotFound: {
 		HTTPStatus: http.StatusNotFound,
@@ -297,9 +409,17 @@ var catalog = map[Code]Definition{
 		HTTPStatus: http.StatusInternalServerError,
 		Detail:     "The Agent runtime operation failed. Please try again.",
 	},
-	CodeACPTurnReplacementUnsupported: {
+	CodeExternalAgentTurnReplacementUnsupported: {
 		HTTPStatus: http.StatusBadRequest,
 		Detail:     "Retry and edit are unavailable for external agent sessions. Send a new message instead.",
+	},
+	CodeExternalRuntimeAuthRequired: {
+		HTTPStatus: http.StatusConflict,
+		Detail:     "The External Agent runtime requires account authorization before it can be used.",
+	},
+	CodeExternalRuntimeUnavailable: {
+		HTTPStatus: http.StatusServiceUnavailable,
+		Detail:     "The external agent runtime for this session is not available on this server.",
 	},
 	CodeACPModelSelectionUnsupported: {
 		HTTPStatus: http.StatusBadRequest,
@@ -380,6 +500,7 @@ var catalog = map[Code]Definition{
 	// A session runs one turn at a time, so this is ordinary backpressure and
 	// the same submission succeeds once the session frees up. It is the one
 	// conflict in this catalog that a client should retry unchanged.
+	CodeSessionModelPreferenceConflict: {HTTPStatus: http.StatusConflict, Detail: "The conversation model selection has changed. Refresh and try again."},
 	CodeSessionBusy: {
 		HTTPStatus: http.StatusConflict,
 		Detail:     "This conversation is still working on the previous message. Please try again shortly.",
@@ -401,6 +522,34 @@ var catalog = map[Code]Definition{
 	CodeAgentResponseInterrupted: {
 		HTTPStatus: http.StatusBadGateway,
 		Detail:     "The model response was interrupted. Please try again.",
+	},
+	CodeQueueSteerUnsupported: {
+		HTTPStatus: http.StatusConflict,
+		Detail:     "This run cannot accept steer input. Wait for it to finish and send a new message.",
+	},
+	CodeQueueNoActiveRun: {
+		HTTPStatus: http.StatusConflict,
+		Detail:     "There is no active run to receive this queued input.",
+	},
+	CodeQueueAdmissionOverloaded: {
+		HTTPStatus: http.StatusTooManyRequests,
+		Detail:     "The queue is busy. Please retry this request shortly.",
+	},
+	CodeQueueAdmissionUnavailable: {
+		HTTPStatus: http.StatusServiceUnavailable,
+		Detail:     "The queue admission service is temporarily unavailable. Please retry shortly.",
+	},
+	CodeQueueRequestInvalid: {
+		HTTPStatus: http.StatusBadRequest,
+		Detail:     "The queue request is invalid.",
+	},
+	CodeQueueItemNotPending: {
+		HTTPStatus: http.StatusConflict,
+		Detail:     "This queue item is no longer accepted and pending.",
+	},
+	CodeQueueCapacityExceeded: {
+		HTTPStatus: http.StatusConflict,
+		Detail:     "This session queue is full. Cancel or wait for pending items before adding more.",
 	},
 	CodeContextLifecycleRequestInvalid: {
 		HTTPStatus: http.StatusBadRequest,

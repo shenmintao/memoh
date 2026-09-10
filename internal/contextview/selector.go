@@ -13,6 +13,14 @@ func (*FragmentSelector) ProfileFor(intent contextfrag.Intent) IntentProfile {
 			MustKeepFrag:    mustKeepProviderSystemFrag,
 			SlotTrustFloors: map[contextfrag.Slot]contextfrag.TrustLevel{contextfrag.SlotSystem: contextfrag.TrustWorkspace},
 		}
+	case contextfrag.IntentExternalAgentPrompt:
+		// ACP system slots describe document position rather than instruction
+		// authority, so external sections may legitimately occupy them and keep
+		// their own per-section budgets.
+		return IntentProfile{
+			Intent:        intent,
+			MustKeepSlots: []contextfrag.Slot{contextfrag.SlotCurrentUser},
+		}
 	default:
 		return IntentProfile{Intent: intent}
 	}
@@ -68,6 +76,20 @@ func (*FragmentSelector) Select(frags []contextfrag.ContextFrag, profile IntentP
 			tagged[i].Tokens = contextfrag.ResolveProviderBudgetFragTokens(tagged[i].Frag)
 		}
 		protectedCost := protectedHistoryTokenCost(tagged)
+		// Protected content must leave room for the trim notice exactly when
+		// trimming will happen: droppable rows that cannot all fit force
+		// spatial drops, and the notice they require is charged against the
+		// summary's ceiling instead of failing the selection afterwards.
+		summaryCeiling := historyBudget
+		if droppable := droppableHistoryTokenCost(tagged); droppable > 0 && droppable > historyBudget-protectedCost {
+			summaryCeiling -= contextfrag.ResolveProviderBudgetFragTokens(TrimNoticeFrag(contextfrag.Scope{}))
+		}
+		if protectedCost > summaryCeiling {
+			if edits := shrinkOversizedProtectedSummaries(tagged, protectedCost, summaryCeiling); len(edits) > 0 {
+				fragBudgetEdits = append(fragBudgetEdits, edits...)
+				protectedCost = protectedHistoryTokenCost(tagged)
+			}
+		}
 		if protectedCost > historyBudget {
 			result := selectionResultFromTaggedReasons(tagged, allSelectedIndexes(tagged), nil)
 			result.FatalError = contextfrag.ErrProtectedContextOverflow

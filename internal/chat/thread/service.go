@@ -20,6 +20,7 @@ import (
 	dbstore "github.com/felinics/memoh/internal/db/store"
 	"github.com/felinics/memoh/internal/hooks"
 	"github.com/felinics/memoh/internal/runtimefence"
+	"github.com/felinics/memoh/internal/runtimekind"
 )
 
 type runtimeFencedThreadWriter interface {
@@ -38,38 +39,69 @@ const (
 
 // Thread represents a chat thread within a bot.
 type Thread struct {
-	ID                    string         `json:"id"`
-	BotID                 string         `json:"bot_id"`
-	BotAgentID            string         `json:"bot_agent_id,omitempty"`
-	RouteID               string         `json:"route_id,omitempty"`
-	ChannelType           string         `json:"channel_type,omitempty"`
-	Type                  string         `json:"type"`
-	SessionMode           string         `json:"session_mode"`
-	RuntimeType           string         `json:"runtime_type"`
-	RuntimeMetadata       map[string]any `json:"runtime_metadata,omitempty"`
-	Title                 string         `json:"title"`
-	Metadata              map[string]any `json:"metadata,omitempty"`
-	ParentThreadID        string         `json:"parent_session_id,omitempty"`
-	CreatedByUserID       string         `json:"created_by_user_id,omitempty"`
-	WorkdirID             string         `json:"workdir_id,omitempty"`
-	CreatedAt             time.Time      `json:"created_at"`
-	UpdatedAt             time.Time      `json:"updated_at"`
-	RouteMetadata         map[string]any `json:"route_metadata,omitempty"`
-	RouteConversationType string         `json:"route_conversation_type,omitempty"`
-	Visibility            Visibility     `json:"-"`
+	ID              string         `json:"id"`
+	BotID           string         `json:"bot_id"`
+	BotAgentID      string         `json:"bot_agent_id,omitempty"`
+	RouteID         string         `json:"route_id,omitempty"`
+	ChannelType     string         `json:"channel_type,omitempty"`
+	Type            string         `json:"type"`
+	SessionMode     string         `json:"session_mode"`
+	RuntimeType     string         `json:"runtime_type"`
+	RuntimeMetadata map[string]any `json:"runtime_metadata,omitempty"`
+	Title           string         `json:"title"`
+	Metadata        map[string]any `json:"metadata,omitempty"`
+	ParentThreadID  string         `json:"parent_session_id,omitempty"`
+	CreatedByUserID string         `json:"created_by_user_id,omitempty"`
+	WorkdirID       string         `json:"workdir_id,omitempty"`
+	CreatedAt       time.Time      `json:"created_at"`
+	UpdatedAt       time.Time      `json:"updated_at"`
+	// Preferred* is the session's persisted (model, effort) pair (issue #879).
+	// Empty means "no memory"; the composer reseeds from it on open/repoint.
+	PreferredExternalModelID string         `json:"preferred_external_model_id,omitempty"`
+	ModelPreferenceRevision  string         `json:"model_preference_revision,omitempty"`
+	PreferredChatModelID     string         `json:"preferred_chat_model_id,omitempty"`
+	PreferredReasoningEffort string         `json:"preferred_reasoning_effort,omitempty"`
+	RouteMetadata            map[string]any `json:"route_metadata,omitempty"`
+	RouteConversationType    string         `json:"route_conversation_type,omitempty"`
+	Visibility               Visibility     `json:"-"`
 } // @name session.Session
 
+// The runtime vocabulary is owned by runtimekind (a leaf package shared with
+// consumers that cannot import this one); these constants are pinned aliases
+// so the session domain keeps its established names.
 const (
 	TypeChat              = "chat"
 	TypeSchedule          = "schedule"
 	TypeSubagent          = "subagent"
 	TypeDiscuss           = "discuss"
 	TypeACPAgent          = "acp_agent"
-	RuntimeModel          = "model"
-	RuntimeACPAgent       = "acp_agent"
+	RuntimeModel          = string(runtimekind.Model)
+	RuntimeACPAgent       = string(runtimekind.ACPAgent)
+	RuntimeCodex          = string(runtimekind.Codex)
+	RuntimeClaudeCode     = string(runtimekind.ClaudeCode)
 	DefaultACPProjectMode = "project"
 	DefaultACPProjectPath = "/data"
 )
+
+// IsDirectRuntimeType reports whether a runtime type is one of the direct
+// external agent runtimes, outside the ACP compatibility pool.
+func IsDirectRuntimeType(runtimeType string) bool {
+	return runtimekind.IsDirect(runtimeType)
+}
+
+// IsDirectRuntime reports whether a session runs on a direct external agent
+// runtime.
+func IsDirectRuntime(thread Thread) bool {
+	return IsDirectRuntimeType(normalizeRuntimeType(thread.RuntimeType, thread.Type))
+}
+
+// UsesDecisionWaiter reports whether tool-approval and user-input decisions
+// for this session are answered by waking an in-process runtime waiter (the
+// ACP pool or a direct external runtime) instead of resuming the native agent
+// loop with a tool result.
+func UsesDecisionWaiter(thread Thread) bool {
+	return runtimekind.UsesDecisionWaiter(normalizeRuntimeType(thread.RuntimeType, thread.Type))
+}
 
 // userFacingSessionTypes lists the session types intended to appear in
 // user-facing session lists. Schedule and subagent sessions are
@@ -100,10 +132,14 @@ var (
 	ErrACPAgentNotConfigured  = errors.New("ACP agent is not configured for this bot")
 	ErrACPRuntimeOwnerMissing = errors.New("runtime_owner_account_id is required for acp_agent sessions")
 	ErrACPProjectModeInvalid  = errors.New("unknown ACP project mode")
-	ErrForkSourceNotFound     = errors.New("fork source session not found")
-	ErrForkSourceNotReply     = errors.New("fork source must be a visible assistant reply")
-	ErrForkSourceNotChat      = errors.New("fork source must be a chat session")
-	ErrSessionHasMessages     = errors.New("session has visible messages")
+	// ErrExternalRuntimeOwnerMissing mirrors the ACP owner requirement for
+	// direct external runtimes: turns execute with workspace authority, so a
+	// session without an owner has nobody to authorize them against.
+	ErrExternalRuntimeOwnerMissing = errors.New("runtime_owner_account_id is required for external runtime sessions")
+	ErrForkSourceNotFound          = errors.New("fork source session not found")
+	ErrForkSourceNotReply          = errors.New("fork source must be a visible assistant reply")
+	ErrForkSourceNotChat           = errors.New("fork source must be a chat session")
+	ErrSessionHasMessages          = errors.New("session has visible messages")
 )
 
 func IsKnownType(typ string) bool {
@@ -172,6 +208,13 @@ type CreateInput struct {
 	// project_path so the runtime works in that directory; it also
 	// leaves a creation-time path snapshot in the metadata for history.
 	WorkdirPath string
+	// PreferredChatModelID / PreferredReasoningEffort are the first-message
+	// pair written at INSERT time (issue #879, spec §3.3-D) so the
+	// session_created broadcast never precedes the value. Empty = NULL.
+	// Non-UUID model references degrade to NULL; the steady-state
+	// write-back completes the pair on the same turn.
+	PreferredChatModelID     string
+	PreferredReasoningEffort string
 	// Visibility overrides the default visibility derived from the session
 	// mode. Schedule-created sessions use this to surface in user-facing
 	// session lists while keeping session_mode='schedule' for prompt and
@@ -222,9 +265,9 @@ type sessionDescriptorTransactionQueries interface {
 	LockSessionRuntimeFenceForActivation(context.Context, sqlc.LockSessionRuntimeFenceForActivationParams) (int64, error)
 	NextSessionRuntimeFenceToken(context.Context) (int64, error)
 	ActivateSessionRuntimeFence(context.Context, sqlc.ActivateSessionRuntimeFenceParams) (int64, error)
-	DeleteACPSessionStatesBySession(context.Context, pgtype.UUID) (int64, error)
-	DeleteACPSessionStateLinesBySession(context.Context, pgtype.UUID) (int64, error)
-	DeleteACPSessionPublicationsBySession(context.Context, pgtype.UUID) (int64, error)
+	DeleteAgentSessionStatesBySession(context.Context, pgtype.UUID) (int64, error)
+	DeleteAgentSessionStateLinesBySession(context.Context, pgtype.UUID) (int64, error)
+	DeleteAgentSessionPublicationsBySession(context.Context, pgtype.UUID) (int64, error)
 }
 
 // Queries is the storage surface owned by the Thread domain. Route lookup and
@@ -238,6 +281,7 @@ type Queries interface {
 	GetVisibleHistoryTurnByMessage(context.Context, sqlc.GetVisibleHistoryTurnByMessageParams) (dbstore.HistoryTurn, error)
 	GetBotByID(context.Context, pgtype.UUID) (sqlc.GetBotByIDRow, error)
 	GetSessionByID(context.Context, pgtype.UUID) (sqlc.BotSession, error)
+	GetLatestSessionModelPreference(context.Context, sqlc.GetLatestSessionModelPreferenceParams) (sqlc.GetLatestSessionModelPreferenceRow, error)
 	GetSubagentConfig(context.Context, pgtype.UUID) (sqlc.SubagentConfig, error)
 	ListSessionsByBot(context.Context, pgtype.UUID) ([]sqlc.ListSessionsByBotRow, error)
 	ListSessionsByBotAndCreatedByUser(context.Context, sqlc.ListSessionsByBotAndCreatedByUserParams) ([]sqlc.ListSessionsByBotAndCreatedByUserRow, error)
@@ -249,6 +293,7 @@ type Queries interface {
 	SoftDeleteSession(context.Context, pgtype.UUID) error
 	TouchSession(context.Context, pgtype.UUID) error
 	UpdateSessionMetadata(context.Context, sqlc.UpdateSessionMetadataParams) (sqlc.BotSession, error)
+	UpdateSessionRuntimeMetadata(context.Context, sqlc.UpdateSessionRuntimeMetadataParams) (sqlc.BotSession, error)
 	UpdateSessionTitle(context.Context, sqlc.UpdateSessionTitleParams) (sqlc.BotSession, error)
 	UpdateSessionTypeAndMetadata(context.Context, sqlc.UpdateSessionTypeAndMetadataParams) (sqlc.BotSession, error)
 }
@@ -258,6 +303,10 @@ type Queries interface {
 type ForkFromAssistantInput struct {
 	BotID    string
 	ThreadID string
+	// RuntimeMetadataOverride replaces the clone's runtime metadata. External
+	// runtime forks must pass it carrying the driver's freshly forked session
+	// keys; without it the two Memoh sessions would share one runtime session.
+	RuntimeMetadataOverride map[string]any
 	// TurnID names the round the fork inherits through. A turn is the identity
 	// a client holds while the round is still live, and the cut is turn-level
 	// anyway, so the fork point is named by turn rather than by stored message.
@@ -400,6 +449,18 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (Thread, error)
 		if err := s.validateACPCreatePolicy(ctx, pgBotID, meta, strings.TrimSpace(input.BotAgentID) == ""); err != nil {
 			return Thread{}, err
 		}
+	} else if IsDirectRuntimeType(desc.RuntimeType) {
+		meta = ApplyExternalMetadataDefaults(meta)
+		runtimeMeta = ApplyExternalMetadataDefaults(runtimeMeta)
+		meta = setACPRuntimeOwner(meta, runtimeOwnerUserID)
+		runtimeMeta = setACPRuntimeOwner(runtimeMeta, runtimeOwnerUserID)
+		if strings.TrimSpace(input.WorkdirID) != "" && strings.TrimSpace(input.WorkdirPath) != "" {
+			meta = overrideACPProjectPath(meta, input.WorkdirPath)
+			runtimeMeta = overrideACPProjectPath(runtimeMeta, input.WorkdirPath)
+		}
+		if err := validateExternalMetadata(meta); err != nil {
+			return Thread{}, err
+		}
 	}
 	metaBytes, err := json.Marshal(meta)
 	if err != nil {
@@ -443,6 +504,10 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (Thread, error)
 		ParentSessionID: pgParentSessionID,
 		CreatedByUserID: pgCreatedByUserID,
 		WorkdirID:       pgWorkdirID,
+		// First-message pair (issue #879): degrade silently to NULL rather
+		// than fail creation on a slug reference or empty value.
+		PreferredChatModelID:     dbpkg.ParseUUIDOrEmpty(input.PreferredChatModelID),
+		PreferredReasoningEffort: pgtype.Text{String: strings.TrimSpace(input.PreferredReasoningEffort), Valid: strings.TrimSpace(input.PreferredReasoningEffort) != ""},
 	})
 	if err != nil {
 		return Thread{}, err
@@ -640,6 +705,12 @@ func (s *Service) ForkFromAssistantTurn(ctx context.Context, input ForkFromAssis
 	if source.Type != TypeChat {
 		return Thread{}, ErrForkSourceNotChat
 	}
+	// External runtime sessions must fork their runtime-side session too; a
+	// caller that has not prepared one (no override) would leave two Memoh
+	// sessions sharing a single runtime session.
+	if IsDirectRuntime(source) && input.RuntimeMetadataOverride == nil {
+		return Thread{}, ErrForkSourceNotChat
+	}
 
 	title := strings.TrimSpace(source.Title)
 	if title == "" {
@@ -664,13 +735,22 @@ func (s *Service) ForkFromAssistantTurn(ctx context.Context, input ForkFromAssis
 		return Thread{}, fmt.Errorf("marshal metadata: %w", err)
 	}
 
+	var runtimeMetadataOverrideBytes []byte
+	if input.RuntimeMetadataOverride != nil {
+		runtimeMetadataOverrideBytes, err = json.Marshal(input.RuntimeMetadataOverride)
+		if err != nil {
+			return Thread{}, fmt.Errorf("marshal fork runtime metadata: %w", err)
+		}
+	}
+
 	row, err := s.queries.ForkSessionFromAssistantTurn(ctx, sqlc.ForkSessionFromAssistantTurnParams{
-		SessionID:       pgSessionID,
-		BotID:           pgBotID,
-		TurnID:          pgTurnID,
-		Title:           forkTitle,
-		Metadata:        metaBytes,
-		CreatedByUserID: pgCreatedByUserID,
+		SessionID:               pgSessionID,
+		BotID:                   pgBotID,
+		TurnID:                  pgTurnID,
+		Title:                   forkTitle,
+		Metadata:                metaBytes,
+		RuntimeMetadataOverride: runtimeMetadataOverrideBytes,
+		CreatedByUserID:         pgCreatedByUserID,
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -776,7 +856,7 @@ func (s *Service) UpdateTypeAndMetadata(ctx context.Context, sessionID, typ stri
 }
 
 // UpdateTypeAndMetadataWithOwner updates a session descriptor and binds any
-// ACP runtime ownership to a server-confirmed account id. The metadata owner
+// External Agent runtime ownership to a server-confirmed account id. The metadata owner
 // field is never trusted from callers.
 func (s *Service) UpdateTypeAndMetadataWithOwner(ctx context.Context, sessionID, typ string, metadata map[string]any, runtimeOwnerUserID string) (Thread, error) {
 	return s.updateTypeAndMetadata(ctx, sessionID, typ, metadata, strings.TrimSpace(runtimeOwnerUserID))
@@ -864,13 +944,13 @@ func (s *Service) UpdateEmptyDescriptorAndMetadataWithOwner(ctx context.Context,
 		}); activateErr != nil {
 			return activateErr
 		}
-		if _, deleteErr := queries.DeleteACPSessionPublicationsBySession(ctx, pgSessionID); deleteErr != nil {
+		if _, deleteErr := queries.DeleteAgentSessionPublicationsBySession(ctx, pgSessionID); deleteErr != nil {
 			return deleteErr
 		}
-		if _, deleteErr := queries.DeleteACPSessionStatesBySession(ctx, pgSessionID); deleteErr != nil {
+		if _, deleteErr := queries.DeleteAgentSessionStatesBySession(ctx, pgSessionID); deleteErr != nil {
 			return deleteErr
 		}
-		_, deleteErr := queries.DeleteACPSessionStateLinesBySession(ctx, pgSessionID)
+		_, deleteErr := queries.DeleteAgentSessionStateLinesBySession(ctx, pgSessionID)
 		return deleteErr
 	})
 	if err != nil {
@@ -911,7 +991,7 @@ func (s *Service) updateDescriptorAndMetadata(ctx context.Context, queries Queri
 	}
 	existingRuntimeMeta := parseJSONMap(existing.RuntimeMetadata)
 	existingMeta := parseJSONMap(existing.Metadata)
-	if normalizeRuntimeType(existing.RuntimeType, existing.Type) == RuntimeACPAgent {
+	if existingRuntime := normalizeRuntimeType(existing.RuntimeType, existing.Type); existingRuntime == RuntimeACPAgent || IsDirectRuntimeType(existingRuntime) {
 		existingRuntimeOwnerUserID := metadataString(existingRuntimeMeta, "runtime_owner_account_id")
 		if existingRuntimeOwnerUserID == "" {
 			existingRuntimeOwnerUserID = metadataString(existingMeta, "runtime_owner_account_id")
@@ -930,10 +1010,11 @@ func (s *Service) updateDescriptorAndMetadata(ctx context.Context, queries Queri
 	sessionType = desc.LegacyType
 	metadata = desc.Metadata
 	runtimeMeta := desc.RuntimeMetadata
-	if desc.RuntimeType != RuntimeACPAgent {
+	if desc.RuntimeType != RuntimeACPAgent && !IsDirectRuntimeType(desc.RuntimeType) {
 		runtimeMeta = map[string]any{}
 	}
-	if desc.RuntimeType == RuntimeACPAgent {
+	switch {
+	case desc.RuntimeType == RuntimeACPAgent:
 		metadata = ApplyACPMetadataDefaults(metadata)
 		runtimeMeta = ApplyACPMetadataDefaults(runtimeMeta)
 		metadata = setACPRuntimeOwner(metadata, runtimeOwnerUserID)
@@ -944,6 +1025,14 @@ func (s *Service) updateDescriptorAndMetadata(ctx context.Context, queries Queri
 			return Thread{}, err
 		}
 		if err := s.validateACPCreatePolicyWithQueries(ctx, queries, existing.BotID, metadata, !pgBotAgentID.Valid); err != nil {
+			return Thread{}, err
+		}
+	case IsDirectRuntimeType(desc.RuntimeType):
+		metadata = ApplyExternalMetadataDefaults(metadata)
+		runtimeMeta = ApplyExternalMetadataDefaults(runtimeMeta)
+		metadata = setACPRuntimeOwner(metadata, runtimeOwnerUserID)
+		runtimeMeta = setACPRuntimeOwner(runtimeMeta, runtimeOwnerUserID)
+		if err := validateExternalMetadata(metadata); err != nil {
 			return Thread{}, err
 		}
 	}
@@ -971,6 +1060,33 @@ func (s *Service) updateDescriptorAndMetadata(ctx context.Context, queries Queri
 }
 
 // Get returns a session by ID.
+// LatestModelPreferenceSeed is the welcome composer seed (issue #879, spec
+// §3.4): the bot's most recent native user-facing session with a persisted
+// pair, scoped to the calling user. Empty pair + nil error = no seed;
+// welcome falls back to the bot default.
+func (s *Service) LatestModelPreferenceSeed(ctx context.Context, botID, userID string) (string, string, error) {
+	id, err := dbpkg.ParseUUID(botID)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid bot id: %w", err)
+	}
+	uid, err := dbpkg.ParseUUID(userID)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid user id: %w", err)
+	}
+	row, err := s.queries.GetLatestSessionModelPreference(ctx, sqlc.GetLatestSessionModelPreferenceParams{BotID: id, CreatedByUserID: uid})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", "", nil
+	}
+	if err != nil {
+		return "", "", err
+	}
+	modelID := ""
+	if row.PreferredChatModelID.Valid {
+		modelID = row.PreferredChatModelID.String()
+	}
+	return modelID, dbpkg.TextToString(row.PreferredReasoningEffort), nil
+}
+
 func (s *Service) Get(ctx context.Context, sessionID string) (Thread, error) {
 	pgID, err := dbpkg.ParseUUID(sessionID)
 	if err != nil {
@@ -981,6 +1097,62 @@ func (s *Service) Get(ctx context.Context, sessionID string) (Thread, error) {
 		return Thread{}, err
 	}
 	return toThread(row), nil
+}
+
+// ErrRuntimeMetadataStale reports that a runtime-metadata merge was skipped
+// because the session no longer runs the expected runtime.
+var ErrRuntimeMetadataStale = errors.New("session runtime changed; runtime metadata merge skipped")
+
+// MergeRuntimeMetadata merges driver-owned keys into a session's runtime
+// metadata; a nil value deletes the key. The write is guarded on runtimeType
+// so a concurrent runtime switch turns the merge into ErrRuntimeMetadataStale
+// instead of polluting another runtime's metadata, and on the caller's
+// runtime fencing token so a superseded owner's late write after a cluster
+// ownership handoff cannot clobber the new owner's runtime thread id.
+func (s *Service) MergeRuntimeMetadata(ctx context.Context, sessionID, runtimeType string, delta map[string]any) (Thread, error) {
+	pgID, err := dbpkg.ParseUUID(sessionID)
+	if err != nil {
+		return Thread{}, fmt.Errorf("invalid session id: %w", err)
+	}
+	row, err := s.queries.GetSessionByID(ctx, pgID)
+	if err != nil {
+		return Thread{}, err
+	}
+	if len(delta) == 0 {
+		return toThread(row), nil
+	}
+	merged := parseJSONMap(row.RuntimeMetadata)
+	if merged == nil {
+		merged = map[string]any{}
+	}
+	for key, value := range delta {
+		if value == nil {
+			delete(merged, key)
+			continue
+		}
+		merged[key] = value
+	}
+	mergedBytes, err := json.Marshal(merged)
+	if err != nil {
+		return Thread{}, fmt.Errorf("marshal runtime metadata: %w", err)
+	}
+	fencingToken := pgtype.Int8{}
+	if fence, ok := runtimefence.FromContext(ctx); ok && fence.Token > 0 {
+		fencingToken = pgtype.Int8{Int64: fence.Token, Valid: true}
+	}
+	updated, err := s.queries.UpdateSessionRuntimeMetadata(ctx, sqlc.UpdateSessionRuntimeMetadataParams{
+		ID:              pgID,
+		RuntimeType:     strings.TrimSpace(runtimeType),
+		FencingToken:    fencingToken,
+		RuntimeMetadata: mergedBytes,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Thread{}, ErrRuntimeMetadataStale
+	}
+	if err != nil {
+		return Thread{}, err
+	}
+	return toThread(updated), nil
 }
 
 // ListByBot returns all active sessions for a bot.
@@ -1410,6 +1582,7 @@ func toThread(row sqlc.BotSession) Thread {
 	if row.ParentSessionID.Valid {
 		parentID = row.ParentSessionID.String()
 	}
+	prefModelID, prefEffort := preferredPairOf(row)
 	createdByUserID := ""
 	if row.CreatedByUserID.Valid {
 		createdByUserID = row.CreatedByUserID.String()
@@ -1420,24 +1593,38 @@ func toThread(row sqlc.BotSession) Thread {
 	}
 	sessionMode := normalizeSessionMode(row.SessionMode, row.Type)
 	return Thread{
-		ID:              row.ID.String(),
-		BotID:           row.BotID.String(),
-		BotAgentID:      row.BotAgentID.String(),
-		RouteID:         row.RouteID.String(),
-		ChannelType:     dbpkg.TextToString(row.ChannelType),
-		Type:            row.Type,
-		SessionMode:     sessionMode,
-		RuntimeType:     normalizeRuntimeType(row.RuntimeType, row.Type),
-		RuntimeMetadata: parseJSONMap(row.RuntimeMetadata),
-		Title:           row.Title,
-		Metadata:        parseJSONMap(row.Metadata),
-		ParentThreadID:  parentID,
-		CreatedByUserID: createdByUserID,
-		WorkdirID:       workdirID,
-		CreatedAt:       row.CreatedAt.Time,
-		UpdatedAt:       row.UpdatedAt.Time,
-		Visibility:      storedVisibility(row.Visibility, sessionMode),
+		ID:                       row.ID.String(),
+		BotID:                    row.BotID.String(),
+		BotAgentID:               row.BotAgentID.String(),
+		RouteID:                  row.RouteID.String(),
+		ChannelType:              dbpkg.TextToString(row.ChannelType),
+		Type:                     row.Type,
+		SessionMode:              sessionMode,
+		RuntimeType:              normalizeRuntimeType(row.RuntimeType, row.Type),
+		RuntimeMetadata:          parseJSONMap(row.RuntimeMetadata),
+		Title:                    row.Title,
+		Metadata:                 parseJSONMap(row.Metadata),
+		ParentThreadID:           parentID,
+		CreatedByUserID:          createdByUserID,
+		WorkdirID:                workdirID,
+		CreatedAt:                row.CreatedAt.Time,
+		UpdatedAt:                row.UpdatedAt.Time,
+		Visibility:               storedVisibility(row.Visibility, sessionMode),
+		PreferredExternalModelID: dbpkg.TextToString(row.PreferredExternalModelID),
+		ModelPreferenceRevision:  uuidText(row.ModelPreferenceRevision),
+		PreferredChatModelID:     prefModelID,
+		PreferredReasoningEffort: prefEffort,
 	}
+}
+
+// preferredPairOf reads the persisted (model, effort) pair off a session row
+// (issue #879); both components are empty when the session has no memory.
+func preferredPairOf(row sqlc.BotSession) (string, string) {
+	modelID := ""
+	if row.PreferredChatModelID.Valid {
+		modelID = row.PreferredChatModelID.String()
+	}
+	return modelID, dbpkg.TextToString(row.PreferredReasoningEffort)
 }
 
 func toSubagentConfig(row sqlc.SubagentConfig) SubagentConfig {
@@ -1476,6 +1663,24 @@ func validateACPMetadata(meta map[string]any) error {
 		return fmt.Errorf("%w %q", ErrACPProjectModeInvalid, metadataString(meta, "acp_project_mode"))
 	}
 	return nil
+}
+
+func validateExternalMetadata(meta map[string]any) error {
+	if strings.TrimSpace(metadataString(meta, "runtime_owner_account_id")) == "" {
+		return ErrExternalRuntimeOwnerMissing
+	}
+	return nil
+}
+
+// ApplyExternalMetadataDefaults fills omitted working-directory metadata for
+// direct external runtime sessions. Unlike ACP there is no project mode: the
+// runtime always works inside the bot workspace.
+func ApplyExternalMetadataDefaults(meta map[string]any) map[string]any {
+	out := nonNilMap(meta)
+	if strings.TrimSpace(metadataString(out, "project_path")) == "" {
+		out["project_path"] = DefaultACPProjectPath
+	}
+	return out
 }
 
 // ApplyACPMetadataDefaults fills omitted ACP session project fields.
@@ -1554,11 +1759,10 @@ func normalizeDescriptor(legacyType, sessionMode, runtimeType string, metadata, 
 	if !IsKnownRuntimeType(runtimeType) {
 		return descriptor{}, fmt.Errorf("unknown runtime type %q", runtimeType)
 	}
-	// Schedule mode joined the ACP-capable modes when schedules gained an
-	// ACP runtime option: a schedule-created session keeps its schedule
-	// mode for prompt/tool gating while an ACP agent executes the turns.
-	if runtimeType == RuntimeACPAgent && sessionMode != TypeChat && sessionMode != TypeDiscuss && sessionMode != TypeSchedule {
-		return descriptor{}, fmt.Errorf("runtime type %q is only supported for %s, %s, or %s session modes", RuntimeACPAgent, TypeChat, TypeDiscuss, TypeSchedule)
+	// The runtime capability table owns which modes each runtime can host
+	// (e.g. agent runtimes never back subagent loops).
+	if !runtimekind.SupportsSessionMode(runtimeType, sessionMode) {
+		return descriptor{}, fmt.Errorf("runtime type %q is only supported for %s session modes", runtimeType, strings.Join(runtimekind.SupportedSessionModes(runtimeType), ", "))
 	}
 	out := descriptor{
 		LegacyType:      legacyTypeForDescriptor(sessionMode, runtimeType),
@@ -1618,12 +1822,7 @@ func IsKnownSessionMode(mode string) bool {
 }
 
 func IsKnownRuntimeType(runtimeType string) bool {
-	switch strings.TrimSpace(runtimeType) {
-	case RuntimeModel, RuntimeACPAgent:
-		return true
-	default:
-		return false
-	}
+	return runtimekind.Valid(runtimeType)
 }
 
 // IsACPRuntime reports whether a session is backed by an ACP runtime. It keeps
@@ -1640,7 +1839,7 @@ func IsACPRuntime(thread Thread) bool {
 // resolver's final guard all call it, so the three surfaces cannot drift.
 func SupportsSkillActivation(sessionMode, legacyType, runtimeType string) bool {
 	return normalizeSessionMode(sessionMode, legacyType) == TypeChat &&
-		normalizeRuntimeType(runtimeType, legacyType) != RuntimeACPAgent
+		normalizeRuntimeType(runtimeType, legacyType) == RuntimeModel
 }
 
 func normalizeSessionMode(mode, legacyType string) string {
@@ -1761,23 +1960,27 @@ func toThreadFromListRow(row sqlc.ListSessionsByBotRow) Thread {
 	}
 	sessionMode := normalizeSessionMode(row.SessionMode, row.Type)
 	return Thread{
-		ID:              row.ID.String(),
-		BotID:           row.BotID.String(),
-		BotAgentID:      row.BotAgentID.String(),
-		RouteID:         row.RouteID.String(),
-		ChannelType:     dbpkg.TextToString(row.ChannelType),
-		Type:            row.Type,
-		SessionMode:     sessionMode,
-		RuntimeType:     normalizeRuntimeType(row.RuntimeType, row.Type),
-		RuntimeMetadata: parseJSONMap(row.RuntimeMetadata),
-		Title:           row.Title,
-		Metadata:        parseJSONMap(row.Metadata),
-		ParentThreadID:  parentID,
-		CreatedByUserID: createdByUserID,
-		WorkdirID:       workdirID,
-		CreatedAt:       row.CreatedAt.Time,
-		UpdatedAt:       row.UpdatedAt.Time,
-		Visibility:      storedVisibility(row.Visibility, sessionMode),
+		ID:                       row.ID.String(),
+		BotID:                    row.BotID.String(),
+		BotAgentID:               row.BotAgentID.String(),
+		RouteID:                  row.RouteID.String(),
+		ChannelType:              dbpkg.TextToString(row.ChannelType),
+		Type:                     row.Type,
+		SessionMode:              sessionMode,
+		RuntimeType:              normalizeRuntimeType(row.RuntimeType, row.Type),
+		RuntimeMetadata:          parseJSONMap(row.RuntimeMetadata),
+		Title:                    row.Title,
+		Metadata:                 parseJSONMap(row.Metadata),
+		ParentThreadID:           parentID,
+		CreatedByUserID:          createdByUserID,
+		WorkdirID:                workdirID,
+		CreatedAt:                row.CreatedAt.Time,
+		UpdatedAt:                row.UpdatedAt.Time,
+		Visibility:               storedVisibility(row.Visibility, sessionMode),
+		PreferredExternalModelID: dbpkg.TextToString(row.PreferredExternalModelID),
+		ModelPreferenceRevision:  uuidText(row.ModelPreferenceRevision),
+		PreferredChatModelID:     uuidText(row.PreferredChatModelID),
+		PreferredReasoningEffort: dbpkg.TextToString(row.PreferredReasoningEffort),
 	}
 }
 
@@ -1796,23 +1999,27 @@ func toThreadFromUserListRow(row sqlc.ListSessionsByBotAndCreatedByUserRow) Thre
 	}
 	sessionMode := normalizeSessionMode(row.SessionMode, row.Type)
 	return Thread{
-		ID:              row.ID.String(),
-		BotID:           row.BotID.String(),
-		BotAgentID:      row.BotAgentID.String(),
-		RouteID:         row.RouteID.String(),
-		ChannelType:     dbpkg.TextToString(row.ChannelType),
-		Type:            row.Type,
-		SessionMode:     sessionMode,
-		RuntimeType:     normalizeRuntimeType(row.RuntimeType, row.Type),
-		RuntimeMetadata: parseJSONMap(row.RuntimeMetadata),
-		Title:           row.Title,
-		Metadata:        parseJSONMap(row.Metadata),
-		ParentThreadID:  parentID,
-		CreatedByUserID: createdByUserID,
-		WorkdirID:       workdirID,
-		CreatedAt:       row.CreatedAt.Time,
-		UpdatedAt:       row.UpdatedAt.Time,
-		Visibility:      storedVisibility(row.Visibility, sessionMode),
+		ID:                       row.ID.String(),
+		BotID:                    row.BotID.String(),
+		BotAgentID:               row.BotAgentID.String(),
+		RouteID:                  row.RouteID.String(),
+		ChannelType:              dbpkg.TextToString(row.ChannelType),
+		Type:                     row.Type,
+		SessionMode:              sessionMode,
+		RuntimeType:              normalizeRuntimeType(row.RuntimeType, row.Type),
+		RuntimeMetadata:          parseJSONMap(row.RuntimeMetadata),
+		Title:                    row.Title,
+		Metadata:                 parseJSONMap(row.Metadata),
+		ParentThreadID:           parentID,
+		CreatedByUserID:          createdByUserID,
+		WorkdirID:                workdirID,
+		CreatedAt:                row.CreatedAt.Time,
+		UpdatedAt:                row.UpdatedAt.Time,
+		Visibility:               storedVisibility(row.Visibility, sessionMode),
+		PreferredExternalModelID: dbpkg.TextToString(row.PreferredExternalModelID),
+		ModelPreferenceRevision:  uuidText(row.ModelPreferenceRevision),
+		PreferredChatModelID:     uuidText(row.PreferredChatModelID),
+		PreferredReasoningEffort: dbpkg.TextToString(row.PreferredReasoningEffort),
 	}
 }
 
@@ -1823,6 +2030,8 @@ func toThreadFromPagedRow(row sqlc.ListSessionsByBotPagedRow) Thread {
 		Title: row.Title, Metadata: row.Metadata,
 		ParentThreadID: row.ParentSessionID, CreatedByUserID: row.CreatedByUserID, WorkdirID: row.WorkdirID,
 		CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
+		PreferredChatModelID: row.PreferredChatModelID, PreferredReasoningEffort: row.PreferredReasoningEffort,
+		PreferredExternalModelID: row.PreferredExternalModelID, ModelPreferenceRevision: row.ModelPreferenceRevision,
 	})
 }
 
@@ -1833,6 +2042,8 @@ func toThreadFromUserPagedRow(row sqlc.ListSessionsByBotAndCreatedByUserPagedRow
 		Title: row.Title, Metadata: row.Metadata,
 		ParentThreadID: row.ParentSessionID, CreatedByUserID: row.CreatedByUserID, WorkdirID: row.WorkdirID,
 		CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
+		PreferredChatModelID: row.PreferredChatModelID, PreferredReasoningEffort: row.PreferredReasoningEffort,
+		PreferredExternalModelID: row.PreferredExternalModelID, ModelPreferenceRevision: row.ModelPreferenceRevision,
 	})
 }
 
@@ -1858,6 +2069,11 @@ type pagedColumns struct {
 	WorkdirID       pgtype.UUID
 	CreatedAt       pgtype.Timestamptz
 	UpdatedAt       pgtype.Timestamptz
+	// Preferred* columns: the session's persisted pair (issue #879).
+	PreferredExternalModelID pgtype.Text
+	ModelPreferenceRevision  pgtype.UUID
+	PreferredChatModelID     pgtype.UUID
+	PreferredReasoningEffort pgtype.Text
 }
 
 func threadFromPagedColumns(c pagedColumns) Thread {
@@ -1875,22 +2091,34 @@ func threadFromPagedColumns(c pagedColumns) Thread {
 	}
 	sessionMode := normalizeSessionMode(c.SessionMode, c.Type)
 	return Thread{
-		ID:              c.ID.String(),
-		BotID:           c.BotID.String(),
-		BotAgentID:      c.BotAgentID.String(),
-		RouteID:         c.RouteID.String(),
-		ChannelType:     dbpkg.TextToString(c.ChannelType),
-		Type:            c.Type,
-		SessionMode:     sessionMode,
-		RuntimeType:     normalizeRuntimeType(c.RuntimeType, c.Type),
-		RuntimeMetadata: parseJSONMap(c.RuntimeMetadata),
-		Title:           c.Title,
-		Metadata:        parseJSONMap(c.Metadata),
-		ParentThreadID:  parentID,
-		CreatedByUserID: createdByUserID,
-		WorkdirID:       workdirID,
-		CreatedAt:       c.CreatedAt.Time,
-		UpdatedAt:       c.UpdatedAt.Time,
-		Visibility:      storedVisibility(c.Visibility, sessionMode),
+		ID:                       c.ID.String(),
+		BotID:                    c.BotID.String(),
+		BotAgentID:               c.BotAgentID.String(),
+		RouteID:                  c.RouteID.String(),
+		ChannelType:              dbpkg.TextToString(c.ChannelType),
+		Type:                     c.Type,
+		SessionMode:              sessionMode,
+		RuntimeType:              normalizeRuntimeType(c.RuntimeType, c.Type),
+		RuntimeMetadata:          parseJSONMap(c.RuntimeMetadata),
+		Title:                    c.Title,
+		Metadata:                 parseJSONMap(c.Metadata),
+		ParentThreadID:           parentID,
+		CreatedByUserID:          createdByUserID,
+		WorkdirID:                workdirID,
+		CreatedAt:                c.CreatedAt.Time,
+		UpdatedAt:                c.UpdatedAt.Time,
+		Visibility:               storedVisibility(c.Visibility, sessionMode),
+		PreferredExternalModelID: dbpkg.TextToString(c.PreferredExternalModelID),
+		ModelPreferenceRevision:  uuidText(c.ModelPreferenceRevision),
+		PreferredChatModelID:     uuidText(c.PreferredChatModelID),
+		PreferredReasoningEffort: dbpkg.TextToString(c.PreferredReasoningEffort),
 	}
+}
+
+// uuidText renders a nullable UUID as a string, "" when invalid.
+func uuidText(id pgtype.UUID) string {
+	if !id.Valid {
+		return ""
+	}
+	return id.String()
 }

@@ -8,8 +8,6 @@ import (
 	"github.com/felinics/memoh/internal/workspace/bridge"
 )
 
-const HermesContainerHome = dataMountPath + "/.memoh-hermes"
-
 type SessionContextInput struct {
 	AgentID       string
 	SetupMode     SetupMode
@@ -25,7 +23,6 @@ type ResolvedSessionContext struct {
 	WorkspaceRoot string
 	ProjectPath   string
 	CWD           string
-	HermesHome    string
 }
 
 func ResolveSessionContext(input SessionContextInput) (ResolvedSessionContext, error) {
@@ -61,9 +58,6 @@ func ResolveSessionContext(input SessionContextInput) (ResolvedSessionContext, e
 		WorkspaceRoot: resolvedRoot,
 		ProjectPath:   projectPath,
 		CWD:           projectPath,
-	}
-	if isHermesAgent(input.AgentID) && ctx.SetupMode != SetupModeSelf {
-		ctx.HermesHome = HermesContainerHome
 	}
 	return ctx, nil
 }

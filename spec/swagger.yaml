@@ -620,6 +620,32 @@ definitions:
       total_text_bytes:
         type: integer
     type: object
+  agentcredential.PublicCredential:
+    properties:
+      account_metadata:
+        additionalProperties: {}
+        type: object
+      auth_kind:
+        type: string
+      created_at:
+        type: string
+      credential_version:
+        type: integer
+      expires_at:
+        type: string
+      id:
+        type: string
+      label:
+        type: string
+      owner_user_id:
+        type: string
+      provider:
+        type: string
+      revoked:
+        type: boolean
+      updated_at:
+        type: string
+    type: object
   apperror.Problem:
     properties:
       args:
@@ -879,12 +905,23 @@ definitions:
     type: object
   botagents.BotAgent:
     properties:
+      agent_credential_id:
+        description: |-
+          AgentCredentialID points at the encrypted credential this instance uses;
+          empty means not connected (legacy metadata path).
+        type: string
       bot_id:
         type: string
       created_at:
         type: string
       deleted_at:
         type: string
+      dependency:
+        allOf:
+        - $ref: '#/definitions/botagents.DependencyRequirement'
+        description: |-
+          Dependency comes from the runtime driver at read time. It is not
+          persisted and is omitted for runtimes without a declaration (ACP).
       enabled:
         type: boolean
       id:
@@ -901,12 +938,22 @@ definitions:
     type: object
   botagents.CreateRequest:
     properties:
+      enabled:
+        description: |-
+          Enabled defaults to true when omitted. The web passes false for direct
+          runtimes so the dependency preflight runs before the agent goes live.
+        type: boolean
       metadata:
         additionalProperties: {}
         type: object
       name:
         type: string
       runtime:
+        type: string
+    type: object
+  botagents.DependencyRequirement:
+    properties:
+      dependency_id:
         type: string
     type: object
   botagents.ListResponse:
@@ -920,6 +967,9 @@ definitions:
     properties:
       enabled:
         type: boolean
+      metadata:
+        additionalProperties: {}
+        type: object
       name:
         type: string
     type: object
@@ -1928,15 +1978,13 @@ definitions:
     - CacheStable
     - CacheDynamic
     - CacheNever
-  contextfrag.CachePlan:
+  contextfrag.CacheComparison:
     properties:
-      mid_stable_message_count:
+      first_step_cache_read_tokens:
         type: integer
-      stable_message_count:
-        type: integer
-      stable_prefix_hash:
+      outcome:
         type: string
-      stable_prefix_token_estimate:
+      prev_age_ms:
         type: integer
     type: object
   contextfrag.CacheUsageRecord:
@@ -2007,14 +2055,69 @@ definitions:
       version:
         type: integer
     type: object
+  contextfrag.Kind:
+    enum:
+    - system_prompt
+    - system_policy
+    - bot_identity
+    - workspace_instruction
+    - platform_identity
+    - tool_usage
+    - conversation_event
+    - current_user_message
+    - attachment_ref
+    - native_image
+    - skills_catalog
+    - hook_context
+    - injected_message
+    - background_summary
+    - runtime_context
+    - memory_recall
+    - conversation_summary
+    type: string
+    x-enum-varnames:
+    - KindSystemPrompt
+    - KindSystemPolicy
+    - KindBotIdentity
+    - KindWorkspaceInstruction
+    - KindPlatformIdentity
+    - KindToolUsage
+    - KindConversationEvent
+    - KindCurrentUserMessage
+    - KindAttachmentRef
+    - KindNativeImage
+    - KindSkillsCatalog
+    - KindHookContext
+    - KindInjectedMessage
+    - KindBackgroundSummary
+    - KindRuntimeContext
+    - KindMemoryRecall
+    - KindConversationSummary
+  contextfrag.KindBreakdown:
+    properties:
+      fragments:
+        type: integer
+      images:
+        type: integer
+      kind:
+        $ref: '#/definitions/contextfrag.Kind'
+      text_bytes:
+        type: integer
+      token_estimate:
+        type: integer
+    type: object
   contextfrag.LifecycleSnapshot:
     properties:
       assistant_message_id:
         type: string
+      breakdown:
+        items:
+          $ref: '#/definitions/contextfrag.KindBreakdown'
+        type: array
       budget_plan:
         $ref: '#/definitions/contextfrag.ContextBudgetPlan'
-      cache_plan:
-        $ref: '#/definitions/contextfrag.CachePlan'
+      cache_comparison:
+        $ref: '#/definitions/contextfrag.CacheComparison'
       cache_read_tokens:
         type: integer
       cache_usage:
@@ -2031,6 +2134,8 @@ definitions:
         type: string
       loop_selection_mode:
         type: string
+      memory_recall:
+        $ref: '#/definitions/contextfrag.MemoryRecallTrace'
       model:
         type: string
       mutations:
@@ -2043,9 +2148,23 @@ definitions:
         items:
           $ref: '#/definitions/contextfrag.SelectionDecision'
         type: array
+      stable_message_count:
+        type: integer
+      stable_prefix_hash:
+        type: string
+      stable_prefix_token_estimate:
+        type: integer
       steps:
         items:
           $ref: '#/definitions/contextfrag.StepSnapshot'
+        type: array
+      tool_defs:
+        items:
+          $ref: '#/definitions/contextfrag.ToolDefAccounting'
+        type: array
+      trust_breakdown:
+        items:
+          $ref: '#/definitions/contextfrag.TrustBreakdown'
         type: array
       version:
         type: integer
@@ -2068,9 +2187,48 @@ definitions:
   contextfrag.ManifestView:
     enum:
     - run_config_pre_provider
+    - external_agent_prompt
     type: string
     x-enum-varnames:
     - ViewRunConfigPreProvider
+    - ViewExternalAgentPrompt
+  contextfrag.MemoryRecallQueryTrace:
+    properties:
+      recent_messages:
+        type: integer
+      source:
+        type: string
+      truncated:
+        type: boolean
+    type: object
+  contextfrag.MemoryRecallResultTrace:
+    properties:
+      context_bytes:
+        type: integer
+      count:
+        type: integer
+      refs:
+        items:
+          type: string
+        type: array
+    type: object
+  contextfrag.MemoryRecallTrace:
+    properties:
+      cache_state:
+        type: string
+      fallback_reason:
+        type: string
+      memory_version:
+        type: string
+      provider_id:
+        type: string
+      query:
+        $ref: '#/definitions/contextfrag.MemoryRecallQueryTrace'
+      result:
+        $ref: '#/definitions/contextfrag.MemoryRecallResultTrace'
+      retrieval_mode:
+        type: string
+    type: object
   contextfrag.MutationKind:
     enum:
     - before_model_call_hook
@@ -2083,7 +2241,9 @@ definitions:
     - context_budget_disabled
     - capability_gate
     - read_media
+    - renderer_prune
     - mid_stream_retry
+    - run_abort_observed
     type: string
     x-enum-varnames:
     - MutationBeforeModelCallHook
@@ -2096,7 +2256,9 @@ definitions:
     - MutationContextBudgetDisabled
     - MutationCapabilityGate
     - MutationReadMedia
+    - MutationRendererPrune
     - MutationMidStreamRetry
+    - MutationRunAbortObserved
   contextfrag.MutationRecord:
     properties:
       detail:
@@ -2165,6 +2327,13 @@ definitions:
     - DecisionDropped
   contextfrag.SelectionTrace:
     properties:
+      drop_reason_tokens:
+        additionalProperties:
+          type: integer
+        description: |-
+          DropReasonTokens is the token estimate lost per drop reason, rolled up
+          when the snapshot is built so readers never need the per-fragment audit.
+        type: object
       drop_reasons:
         additionalProperties:
           type: integer
@@ -2172,6 +2341,8 @@ definitions:
       dropped:
         type: integer
       selected:
+        type: integer
+      trimmed:
         type: integer
     type: object
   contextfrag.Slot:
@@ -2211,6 +2382,42 @@ definitions:
       truncated:
         type: integer
     type: object
+  contextfrag.ToolDefAccounting:
+    properties:
+      bytes:
+        type: integer
+      name:
+        type: string
+      provider:
+        type: string
+      token_estimate:
+        type: integer
+    type: object
+  contextfrag.TrustBreakdown:
+    properties:
+      fragments:
+        type: integer
+      images:
+        type: integer
+      text_bytes:
+        type: integer
+      token_estimate:
+        type: integer
+      trust:
+        $ref: '#/definitions/contextfrag.TrustLevel'
+    type: object
+  contextfrag.TrustLevel:
+    enum:
+    - system
+    - workspace
+    - user
+    - external
+    type: string
+    x-enum-varnames:
+    - TrustSystem
+    - TrustWorkspace
+    - TrustUser
+    - TrustExternal
   conversation.SkillActivation:
     properties:
       prompt:
@@ -2312,6 +2519,15 @@ definitions:
     properties:
       approval:
         $ref: '#/definitions/conversation.UIToolApproval'
+      args:
+        additionalProperties:
+          type: string
+        description: |-
+          Args are the machine-readable parameters of a notice block: the string
+          values of the runtime_notice event metadata (dep_id and install_task_id
+          for a workspace dependency notice, for instance). The client renders
+          actions from them instead of parsing Content.
+        type: object
       attachments:
         items:
           $ref: '#/definitions/conversation.UIAttachment'
@@ -2351,6 +2567,7 @@ definitions:
     - tool
     - attachments
     - error
+    - notice
     type: string
     x-enum-varnames:
     - UIMessageText
@@ -2358,6 +2575,7 @@ definitions:
     - UIMessageTool
     - UIMessageAttachments
     - UIMessageError
+    - UIMessageNotice
   conversation.UIReasoningTiming:
     properties:
       duration_ms:
@@ -2662,6 +2880,75 @@ definitions:
       provider:
         type: string
     type: object
+  external.ModelCatalog:
+    properties:
+      configured_model_id:
+        type: string
+      configured_reasoning_effort:
+        type: string
+      models:
+        items:
+          $ref: '#/definitions/external.ModelOption'
+        type: array
+    type: object
+  external.ModelOption:
+    properties:
+      default:
+        type: boolean
+      default_reasoning_effort:
+        type: string
+      description:
+        type: string
+      id:
+        type: string
+      name:
+        type: string
+      reasoning_efforts:
+        items:
+          $ref: '#/definitions/external.ReasoningEffortOption'
+        type: array
+    type: object
+  external.ReasoningEffortOption:
+    properties:
+      description:
+        type: string
+      id:
+        type: string
+      name:
+        type: string
+    type: object
+  externalagent.CodexDeviceLoginAuthorizeResponse:
+    properties:
+      login_id:
+        type: string
+      user_code:
+        type: string
+      verification_url:
+        type: string
+    required:
+    - login_id
+    - user_code
+    - verification_url
+    type: object
+  externalagent.CodexDeviceLoginPollRequest:
+    properties:
+      login_id:
+        type: string
+    required:
+    - login_id
+    type: object
+  externalagent.CodexDeviceLoginPollResponse:
+    properties:
+      status:
+        enum:
+        - pending
+        - success
+        - error
+        - unknown
+        type: string
+    required:
+    - status
+    type: object
   fetchproviders.CreateRequest:
     properties:
       config:
@@ -2776,80 +3063,6 @@ definitions:
       updated_at:
         type: string
     type: object
-  handlers.ACPClaudeCodeOAuthAuthorizeResponse:
-    properties:
-      auth_url:
-        type: string
-      session_id:
-        type: string
-    type: object
-  handlers.ACPClaudeCodeOAuthExchangeRequest:
-    properties:
-      code:
-        type: string
-      session_id:
-        type: string
-    type: object
-  handlers.ACPClaudeCodeOAuthStatus:
-    properties:
-      configured:
-        type: boolean
-      has_token:
-        type: boolean
-    type: object
-  handlers.ACPCodexOAuthAuthorizeResponse:
-    properties:
-      auth_url:
-        type: string
-    type: object
-  handlers.ACPCodexOAuthDeviceAuthorizeResponse:
-    properties:
-      expires_at:
-        type: string
-      interval_seconds:
-        type: integer
-      session_id:
-        type: string
-      user_code:
-        type: string
-      verification_url:
-        type: string
-    type: object
-  handlers.ACPCodexOAuthDeviceSessionRequest:
-    properties:
-      session_id:
-        type: string
-    required:
-    - session_id
-    type: object
-  handlers.ACPCodexOAuthDeviceStatusResponse:
-    properties:
-      account_id:
-        type: string
-      error:
-        type: string
-      expires_at:
-        type: string
-      has_token:
-        type: boolean
-      interval_seconds:
-        type: integer
-      next_poll_after:
-        type: string
-      status:
-        type: string
-    type: object
-  handlers.ACPCodexOAuthStatus:
-    properties:
-      account_id:
-        type: string
-      callback_url:
-        type: string
-      configured:
-        type: boolean
-      has_token:
-        type: boolean
-    type: object
   handlers.BatchDeleteRequest:
     properties:
       ids:
@@ -2957,6 +3170,13 @@ definitions:
         type: boolean
       type:
         type: string
+    type: object
+  handlers.CompactionInfo:
+    properties:
+      auto_tokens:
+        type: integer
+      enabled:
+        type: boolean
     type: object
   handlers.ConnectorCredentialRequest:
     properties:
@@ -3076,8 +3296,51 @@ definitions:
       used_bytes:
         type: integer
     type: object
+  handlers.ContextLifecycleAggregates:
+    properties:
+      drop_reasons:
+        additionalProperties:
+          type: integer
+        type: object
+      mutation_kinds:
+        additionalProperties:
+          type: integer
+        type: object
+      total_cache_read_tokens:
+        type: integer
+      total_cache_write_tokens:
+        type: integer
+      turns:
+        type: integer
+    type: object
   handlers.ContextLifecycleResponse:
     properties:
+      aggregate_scope:
+        description: |-
+          AggregateScope is always "returned_page": aggregates cover the returned
+          turns, never the whole session.
+        type: string
+      aggregates:
+        $ref: '#/definitions/handlers.ContextLifecycleAggregates'
+      has_more:
+        description: HasMore reports whether older lifecycle turns exist beyond this
+          page.
+        type: boolean
+      legacy_history_may_exist:
+        description: |-
+          LegacyHistoryMayExist reports that pre-run-table assistant metadata also
+          exists for this session while the run-keyed table served the page, so
+          this response does not cover the session's full history era.
+        type: boolean
+      legacy_source:
+        description: |-
+          LegacySource reports that turns were recovered from pre-run-table
+          assistant metadata instead of the run-keyed lifecycle table.
+        type: boolean
+      limit:
+        description: Limit is the page bound the turns and aggregates were computed
+          over.
+        type: integer
       turns:
         items:
           $ref: '#/definitions/handlers.ContextLifecycleTurn'
@@ -3100,8 +3363,20 @@ definitions:
     type: object
   handlers.ContextUsage:
     properties:
+      breakdown:
+        items:
+          $ref: '#/definitions/contextfrag.KindBreakdown'
+        type: array
+      budget_plan:
+        $ref: '#/definitions/contextfrag.ContextBudgetPlan'
+      compaction:
+        $ref: '#/definitions/handlers.CompactionInfo'
       context_window:
         type: integer
+      tool_defs:
+        items:
+          $ref: '#/definitions/handlers.ToolDefBucket'
+        type: array
       used_tokens:
         type: integer
     type: object
@@ -4164,6 +4439,15 @@ definitions:
       reason:
         type: string
     type: object
+  handlers.ToolDefBucket:
+    properties:
+      provider:
+        type: string
+      token_estimate:
+        type: integer
+      tools:
+        type: integer
+    type: object
   handlers.TriggerCompactResponse:
     properties:
       message_count:
@@ -4212,6 +4496,407 @@ definitions:
       storage_bytes:
         type: integer
     type: object
+  handlers.WorkspaceDependencyCatalogItem:
+    properties:
+      actions_supported:
+        description: |-
+          ActionsSupported lists the actions the catalog gives the dependency,
+          before any workspace state is considered.
+        items:
+          enum:
+          - install
+          - update
+          - reinstall
+          - remove
+          - rollback
+          - check_update
+          type: string
+        type: array
+      category:
+        description: Category is agent, runtime, or tool.
+        enum:
+        - agent
+        - runtime
+        - tool
+        type: string
+      definition_revision:
+        type: string
+      description:
+        type: string
+      has_image_baseline:
+        description: |-
+          HasImageBaseline is set when the workspace image ships a copy of the
+          dependency; removing a managed overlay returns to that copy.
+        type: boolean
+      icon:
+        type: string
+      icon_url:
+        type: string
+      id:
+        type: string
+      installable:
+        description: |-
+          Installable is set when the catalog has an install script for the
+          dependency, i.e. it can be installed into a workspace (as a managed
+          overlay when the image already ships it).
+        type: boolean
+      name:
+        type: string
+      platforms:
+        items:
+          $ref: '#/definitions/handlers.WorkspaceDependencyCatalogPlatform'
+        type: array
+      provides:
+        description: Provides lists the commands the dependency makes available.
+        items:
+          type: string
+        type: array
+      registry_id:
+        type: string
+      retired:
+        type: boolean
+      translations:
+        additionalProperties:
+          $ref: '#/definitions/handlers.WorkspaceDependencyTranslation'
+        type: object
+      version_pin:
+        description: |-
+          VersionPin is the version every install produces when the manifest
+          locks one; omitted when installs follow the latest release.
+        type: string
+    type: object
+  handlers.WorkspaceDependencyCatalogPlatform:
+    properties:
+      arch:
+        items:
+          type: string
+        type: array
+      libc:
+        description: Libc is empty when the libc flavour does not matter for the OS.
+        type: string
+      os:
+        type: string
+    type: object
+  handlers.WorkspaceDependencyCatalogResponse:
+    properties:
+      catalog_fetched_at:
+        type: string
+      catalog_stale:
+        type: boolean
+      items:
+        items:
+          $ref: '#/definitions/handlers.WorkspaceDependencyCatalogItem'
+        type: array
+    type: object
+  handlers.WorkspaceDependencyInstallRequest:
+    properties:
+      definition_revision:
+        type: string
+      session_id:
+        description: SessionID optionally routes operation progress to its originating
+          conversation.
+        type: string
+      version:
+        description: |-
+          Version to install. Empty (or no body) installs the latest version the
+          catalog script resolves, or the manifest pin when the dependency has
+          one. The version recorded afterwards is the one the script reports.
+        type: string
+    type: object
+  handlers.WorkspaceDependencyItem:
+    properties:
+      actions:
+        description: Actions lists what may be requested right now.
+        items:
+          enum:
+          - install
+          - update
+          - reinstall
+          - remove
+          - rollback
+          - check_update
+          type: string
+        type: array
+      category:
+        description: Category is agent, runtime, or tool.
+        enum:
+        - agent
+        - runtime
+        - tool
+        type: string
+      definition_revision:
+        type: string
+      description:
+        type: string
+      icon:
+        type: string
+      icon_url:
+        type: string
+      id:
+        type: string
+      image_version:
+        description: |-
+          ImageVersion is the version of the copy the workspace image ships,
+          omitted when the image has none. It is the baseline a managed overlay
+          sits on and what remove returns to.
+        type: string
+      install_path:
+        description: |-
+          InstallPath is the dependency home when a managed copy is in effect or
+          can be installed, and the discovered command path when the image copy
+          is in effect.
+        type: string
+      installed_version:
+        description: |-
+          InstalledVersion is the version of the copy in effect: the one the
+          runtime launches and the one first on PATH (managed, then image, then
+          PATH).
+        type: string
+      last_checked_at:
+        type: string
+      last_error:
+        type: string
+      last_error_code:
+        type: string
+      latest_version:
+        description: |-
+          LatestVersion is the last upstream check result, omitted until a check
+          ran.
+        type: string
+      name:
+        type: string
+      overlay:
+        description: |-
+          Overlay is set when the copy in effect is a managed one installed over
+          an image copy.
+        type: boolean
+      platform_reason:
+        enum:
+        - unsupported_platform
+        type: string
+      platform_supported:
+        description: |-
+          PlatformSupported is false when the probed workspace platform is not
+          listed by the catalog manifest; PlatformReason then says why.
+        type: boolean
+      previous_version:
+        description: PreviousVersion is the version rollback would switch back to.
+        type: string
+      provides:
+        description: Provides lists the commands the dependency makes available.
+        items:
+          type: string
+        type: array
+      registry_id:
+        type: string
+      retired:
+        type: boolean
+      source:
+        description: |-
+          Source is image for dependencies shipped with the workspace image and
+          managed for dependencies installed by catalog scripts.
+        enum:
+        - image
+        - managed
+        type: string
+      status:
+        description: |-
+          Status is omitted when the dependency has no record and was not found
+          in the workspace.
+        enum:
+        - installed
+        - installing
+        - updating
+        - removing
+        - missing
+        - failed
+        type: string
+      translations:
+        additionalProperties:
+          $ref: '#/definitions/handlers.WorkspaceDependencyTranslation'
+        type: object
+      update_available:
+        description: |-
+          UpdateAvailable is set for installed dependencies whose last upstream
+          check reported a version other than the one in effect.
+        type: boolean
+    type: object
+  handlers.WorkspaceDependencyListResponse:
+    properties:
+      catalog_fetched_at:
+        type: string
+      catalog_stale:
+        type: boolean
+      discovery_error:
+        description: |-
+          DiscoveryError is set when the workspace is running but could not be
+          inspected (the discovery command was killed or timed out). Items then
+          reflect the installation records alone, without workspace facts or
+          actions; a refresh retries discovery.
+        type: string
+      items:
+        items:
+          $ref: '#/definitions/handlers.WorkspaceDependencyItem'
+        type: array
+      platform:
+        $ref: '#/definitions/handlers.WorkspaceDependencyPlatform'
+      workspace_state:
+        enum:
+        - running
+        - not_running
+        - missing
+        - remote_offline
+        type: string
+    type: object
+  handlers.WorkspaceDependencyOperationResponse:
+    properties:
+      action:
+        type: string
+      definition_revision:
+        type: string
+      dependency_id:
+        type: string
+      entrypoints:
+        additionalProperties:
+          type: string
+        type: object
+      status:
+        type: string
+      version:
+        type: string
+    type: object
+  handlers.WorkspaceDependencyPlatform:
+    properties:
+      arch:
+        type: string
+      libc:
+        type: string
+      os:
+        type: string
+    type: object
+  handlers.WorkspaceDependencyPreflightItem:
+    properties:
+      dependency_id:
+        type: string
+      installed_version:
+        type: string
+      name:
+        type: string
+      state:
+        enum:
+        - satisfied
+        - missing
+        - platform_unsupported
+        - unknown_dependency
+        type: string
+    type: object
+  handlers.WorkspaceDependencyPreflightRequest:
+    properties:
+      dependency_ids:
+        items:
+          type: string
+        type: array
+      workspace_target_id:
+        description: WorkspaceTargetID overrides the query parameter of the same name.
+        type: string
+    type: object
+  handlers.WorkspaceDependencyPreflightResponse:
+    properties:
+      items:
+        items:
+          $ref: '#/definitions/handlers.WorkspaceDependencyPreflightItem'
+        type: array
+      workspace_state:
+        enum:
+        - running
+        - not_running
+        - missing
+        - remote_offline
+        type: string
+    type: object
+  handlers.WorkspaceDependencyScriptEnv:
+    properties:
+      key:
+        type: string
+      secret:
+        type: boolean
+      value:
+        description: Value is empty when Secret is set.
+        type: string
+    type: object
+  handlers.WorkspaceDependencyScriptResponse:
+    properties:
+      action:
+        enum:
+        - install
+        - update
+        - remove
+        - reinstall
+        - rollback
+        type: string
+      definition_revision:
+        type: string
+      dependency_id:
+        type: string
+      digest:
+        type: string
+      env:
+        items:
+          $ref: '#/definitions/handlers.WorkspaceDependencyScriptEnv'
+        type: array
+      exec:
+        type: string
+      script:
+        type: string
+      timeout_seconds:
+        type: integer
+    type: object
+  handlers.WorkspaceDependencyStreamEvent:
+    properties:
+      args:
+        additionalProperties:
+          type: string
+        type: object
+      code:
+        type: string
+      data:
+        type: string
+      definition_revision:
+        type: string
+      dependency_id:
+        type: string
+      detail:
+        type: string
+      entrypoints:
+        additionalProperties:
+          type: string
+        type: object
+      message:
+        type: string
+      request_id:
+        type: string
+      stream:
+        enum:
+        - stdout
+        - stderr
+        type: string
+      type:
+        enum:
+        - started
+        - log
+        - done
+        - error
+        type: string
+      version:
+        type: string
+    type: object
+  handlers.WorkspaceDependencyTranslation:
+    properties:
+      description:
+        type: string
+      name:
+        type: string
+    type: object
   handlers.acpRuntimeCreateRequest:
     properties:
       acp_agent_id:
@@ -4235,6 +4920,15 @@ definitions:
     properties:
       reasoning_effort:
         type: string
+    type: object
+  handlers.agentCredentialPutRequest:
+    properties:
+      auth_kind:
+        type: string
+      secret:
+        additionalProperties:
+          type: string
+        type: object
     type: object
   handlers.browserSessionCreateRequest:
     properties:
@@ -4274,6 +4968,15 @@ definitions:
       metadata:
         additionalProperties: {}
         type: object
+      preferred_chat_model_id:
+        description: |-
+          PreferredChatModelID / PreferredReasoningEffort carry the first-send
+          picker pair (issue #879 spec v2). The composer sends them only when the
+          pair has an explicit source (user pick or remembered session); omitted
+          fields leave the columns NULL so the session follows the bot default.
+        type: string
+      preferred_reasoning_effort:
+        type: string
       runtime_metadata:
         additionalProperties: {}
         type: object
@@ -4362,6 +5065,43 @@ definitions:
         type: boolean
       provider:
         type: string
+    type: object
+  handlers.enqueueQueueRequest:
+    properties:
+      invocation_id:
+        type: string
+      text:
+        type: string
+    required:
+    - invocation_id
+    - text
+    type: object
+  handlers.followUpQueueItemResponse:
+    properties:
+      enqueued_during_run_id:
+        type: string
+      item_id:
+        type: string
+      position:
+        type: integer
+      status:
+        $ref: '#/definitions/sessionruntime.QueueStatus'
+      text:
+        type: string
+    type: object
+  handlers.followUpQueueReorderRequest:
+    properties:
+      before:
+        $ref: '#/definitions/sessionruntime.FollowUpPendingRef'
+      item:
+        $ref: '#/definitions/sessionruntime.FollowUpPendingRef'
+    type: object
+  handlers.followUpQueueResponse:
+    properties:
+      items:
+        items:
+          $ref: '#/definitions/handlers.followUpQueueItemResponse'
+        type: array
     type: object
   handlers.forkSessionRequest:
     properties:
@@ -4509,6 +5249,13 @@ definitions:
       memory:
         type: string
     type: object
+  handlers.modelPreferenceSeedResponse:
+    properties:
+      model_id:
+        type: string
+      reasoning_effort:
+        type: string
+    type: object
   handlers.oauthAuthorizeRequest:
     properties:
       callback_url:
@@ -4530,10 +5277,50 @@ definitions:
       state:
         type: string
     type: object
+  handlers.sessionQueueResponse:
+    properties:
+      follow_up:
+        items:
+          $ref: '#/definitions/handlers.followUpQueueItemResponse'
+        type: array
+      steer:
+        items:
+          $ref: '#/definitions/handlers.steerQueueItemResponse'
+        type: array
+      steer_supported:
+        type: boolean
+    type: object
   handlers.skillsOpResponse:
     properties:
       ok:
         type: boolean
+    type: object
+  handlers.steerQueueItemResponse:
+    properties:
+      item_id:
+        type: string
+      position:
+        type: integer
+      status:
+        $ref: '#/definitions/sessionruntime.QueueStatus'
+      target_run_id:
+        type: string
+      text:
+        type: string
+    type: object
+  handlers.steerQueueReorderRequest:
+    properties:
+      before:
+        $ref: '#/definitions/sessionruntime.SteerPendingRef'
+      item:
+        $ref: '#/definitions/sessionruntime.SteerPendingRef'
+    type: object
+  handlers.steerQueueResponse:
+    properties:
+      items:
+        items:
+          $ref: '#/definitions/handlers.steerQueueItemResponse'
+        type: array
     type: object
   handlers.synthesizeRequest:
     properties:
@@ -4556,13 +5343,32 @@ definitions:
       shell:
         type: string
     type: object
+  handlers.updateQueueRequest:
+    properties:
+      text:
+        type: string
+    required:
+    - text
+    type: object
   handlers.updateSessionRequest:
     properties:
       bot_agent_id:
         type: string
+      expected_model_preference_revision:
+        type: string
       metadata:
         additionalProperties: {}
         type: object
+      preferred_chat_model_id:
+        description: |-
+          PreferredChatModelID / PreferredReasoningEffort are the picker pair
+          (issue #879). The composer always patches the pair together; either one
+          alone is reconciled against the model the session would actually use.
+          Changing either requires ExpectedModelPreferenceRevision ("" when the
+          session has none yet): picker writes are always compare-and-set.
+        type: string
+      preferred_reasoning_effort:
+        type: string
       runtime_metadata:
         additionalProperties: {}
         type: object
@@ -5247,8 +6053,8 @@ definitions:
         type: string
       acp_model_id:
         description: |-
-          ACPModelID is an agent-reported model identifier override for ACP
-          runs (e.g. a Codex model id). Mutually exclusive with ModelID.
+          ACPModelID is an agent-reported model identifier override for External
+          Agent runs. Mutually exclusive with ModelID.
         type: string
       bot_agent_id:
         description: |-
@@ -5299,8 +6105,8 @@ definitions:
         type: string
       acp_model_id:
         description: |-
-          ACPModelID is an agent-reported model identifier override for ACP
-          runs (e.g. a Codex model id). Mutually exclusive with ModelID.
+          ACPModelID is an agent-reported model identifier override for External
+          Agent runs. Mutually exclusive with ModelID.
         type: string
       bot_agent_id:
         description: |-
@@ -5384,8 +6190,8 @@ definitions:
         type: string
       acp_model_id:
         description: |-
-          ACPModelID is an agent-reported model identifier override for ACP
-          runs (e.g. a Codex model id). Mutually exclusive with ModelID.
+          ACPModelID is an agent-reported model identifier override for External
+          Agent runs. Mutually exclusive with ModelID.
         type: string
       bot_agent_id:
         description: |-
@@ -5580,7 +6386,18 @@ definitions:
       metadata:
         additionalProperties: {}
         type: object
+      model_preference_revision:
+        type: string
       parent_session_id:
+        type: string
+      preferred_chat_model_id:
+        type: string
+      preferred_external_model_id:
+        description: |-
+          Preferred* is the session's persisted (model, effort) pair (issue #879).
+          Empty means "no memory"; the composer reseeds from it on open/repoint.
+        type: string
+      preferred_reasoning_effort:
         type: string
       route_conversation_type:
         type: string
@@ -5603,6 +6420,32 @@ definitions:
       updated_at:
         type: string
       workdir_id:
+        type: string
+    type: object
+  sessionruntime.FollowUpPendingRef:
+    properties:
+      item_id:
+        type: string
+    type: object
+  sessionruntime.QueueStatus:
+    enum:
+    - accepted
+    - claimed
+    - applied
+    - rejected
+    - expired
+    - canceled
+    type: string
+    x-enum-varnames:
+    - QueueAccepted
+    - QueueClaimed
+    - QueueApplied
+    - QueueRejected
+    - QueueExpired
+    - QueueCanceled
+  sessionruntime.SteerPendingRef:
+    properties:
+      item_id:
         type: string
     type: object
   settings.Settings:
@@ -6898,243 +7741,10 @@ paths:
       summary: Set an ACP runtime's reasoning effort
       tags:
       - acp
-  /bots/{bot_id}/acp/claude-code/oauth/authorize:
-    get:
-      parameters:
-      - description: Bot ID
-        in: path
-        name: bot_id
-        required: true
-        type: string
-      responses:
-        "200":
-          description: OK
-          schema:
-            $ref: '#/definitions/handlers.ACPClaudeCodeOAuthAuthorizeResponse'
-        "400":
-          description: Bad Request
-          schema:
-            $ref: '#/definitions/handlers.ErrorResponse'
-        "404":
-          description: Not Found
-          schema:
-            $ref: '#/definitions/handlers.ErrorResponse'
-      summary: Start Claude Code ACP OAuth authorization
-      tags:
-      - acp
-  /bots/{bot_id}/acp/claude-code/oauth/exchange:
-    post:
-      parameters:
-      - description: Bot ID
-        in: path
-        name: bot_id
-        required: true
-        type: string
-      - description: OAuth exchange request
-        in: body
-        name: request
-        required: true
-        schema:
-          $ref: '#/definitions/handlers.ACPClaudeCodeOAuthExchangeRequest'
-      responses:
-        "200":
-          description: OK
-          schema:
-            $ref: '#/definitions/handlers.ACPClaudeCodeOAuthStatus'
-        "400":
-          description: Bad Request
-          schema:
-            $ref: '#/definitions/handlers.ErrorResponse'
-        "404":
-          description: Not Found
-          schema:
-            $ref: '#/definitions/handlers.ErrorResponse'
-      summary: Exchange Claude Code OAuth code for an ACP token
-      tags:
-      - acp
-  /bots/{bot_id}/acp/claude-code/oauth/status:
-    get:
-      parameters:
-      - description: Bot ID
-        in: path
-        name: bot_id
-        required: true
-        type: string
-      responses:
-        "200":
-          description: OK
-          schema:
-            $ref: '#/definitions/handlers.ACPClaudeCodeOAuthStatus'
-        "400":
-          description: Bad Request
-          schema:
-            $ref: '#/definitions/handlers.ErrorResponse'
-        "404":
-          description: Not Found
-          schema:
-            $ref: '#/definitions/handlers.ErrorResponse'
-      summary: Get Claude Code ACP OAuth status
-      tags:
-      - acp
-  /bots/{bot_id}/acp/codex/oauth/authorize:
-    get:
-      parameters:
-      - description: Bot ID
-        in: path
-        name: bot_id
-        required: true
-        type: string
-      responses:
-        "200":
-          description: OK
-          schema:
-            $ref: '#/definitions/handlers.ACPCodexOAuthAuthorizeResponse'
-        "400":
-          description: Bad Request
-          schema:
-            $ref: '#/definitions/handlers.ErrorResponse'
-        "404":
-          description: Not Found
-          schema:
-            $ref: '#/definitions/handlers.ErrorResponse'
-      summary: Start Codex ACP OAuth authorization
-      tags:
-      - acp
-  /bots/{bot_id}/acp/codex/oauth/device/authorize:
-    post:
-      parameters:
-      - description: Bot ID
-        in: path
-        name: bot_id
-        required: true
-        type: string
-      responses:
-        "200":
-          description: OK
-          schema:
-            $ref: '#/definitions/handlers.ACPCodexOAuthDeviceAuthorizeResponse'
-        "400":
-          description: Bad Request
-          schema:
-            $ref: '#/definitions/handlers.ErrorResponse'
-        "403":
-          description: Forbidden
-          schema:
-            $ref: '#/definitions/handlers.ErrorResponse'
-        "404":
-          description: Not Found
-          schema:
-            $ref: '#/definitions/handlers.ErrorResponse'
-        "500":
-          description: Internal Server Error
-          schema:
-            $ref: '#/definitions/handlers.ErrorResponse'
-      summary: Start Codex ACP device code authorization
-      tags:
-      - acp
-  /bots/{bot_id}/acp/codex/oauth/device/cancel:
-    post:
-      parameters:
-      - description: Bot ID
-        in: path
-        name: bot_id
-        required: true
-        type: string
-      - description: Device authorization session
-        in: body
-        name: request
-        required: true
-        schema:
-          $ref: '#/definitions/handlers.ACPCodexOAuthDeviceSessionRequest'
-      responses:
-        "200":
-          description: OK
-          schema:
-            $ref: '#/definitions/handlers.ACPCodexOAuthDeviceStatusResponse'
-        "400":
-          description: Bad Request
-          schema:
-            $ref: '#/definitions/handlers.ErrorResponse'
-        "403":
-          description: Forbidden
-          schema:
-            $ref: '#/definitions/handlers.ErrorResponse'
-        "404":
-          description: Not Found
-          schema:
-            $ref: '#/definitions/handlers.ErrorResponse'
-        "500":
-          description: Internal Server Error
-          schema:
-            $ref: '#/definitions/handlers.ErrorResponse'
-      summary: Cancel Codex ACP device code authorization
-      tags:
-      - acp
-  /bots/{bot_id}/acp/codex/oauth/device/poll:
-    post:
-      parameters:
-      - description: Bot ID
-        in: path
-        name: bot_id
-        required: true
-        type: string
-      - description: Device authorization session
-        in: body
-        name: request
-        required: true
-        schema:
-          $ref: '#/definitions/handlers.ACPCodexOAuthDeviceSessionRequest'
-      responses:
-        "200":
-          description: OK
-          schema:
-            $ref: '#/definitions/handlers.ACPCodexOAuthDeviceStatusResponse'
-        "400":
-          description: Bad Request
-          schema:
-            $ref: '#/definitions/handlers.ErrorResponse'
-        "403":
-          description: Forbidden
-          schema:
-            $ref: '#/definitions/handlers.ErrorResponse'
-        "404":
-          description: Not Found
-          schema:
-            $ref: '#/definitions/handlers.ErrorResponse'
-        "500":
-          description: Internal Server Error
-          schema:
-            $ref: '#/definitions/handlers.ErrorResponse'
-      summary: Poll Codex ACP device code authorization
-      tags:
-      - acp
-  /bots/{bot_id}/acp/codex/oauth/status:
-    get:
-      parameters:
-      - description: Bot ID
-        in: path
-        name: bot_id
-        required: true
-        type: string
-      responses:
-        "200":
-          description: OK
-          schema:
-            $ref: '#/definitions/handlers.ACPCodexOAuthStatus'
-        "400":
-          description: Bad Request
-          schema:
-            $ref: '#/definitions/handlers.ErrorResponse'
-        "404":
-          description: Not Found
-          schema:
-            $ref: '#/definitions/handlers.ErrorResponse'
-      summary: Get Codex ACP OAuth status
-      tags:
-      - acp
   /bots/{bot_id}/agents:
     get:
-      description: List active and disabled non-deleted Agents attached to a bot
+      description: List active and disabled non-deleted Agents attached to a bot.
+        Direct-runtime Agents carry the workspace dependency their runtime declares.
       parameters:
       - description: Bot ID
         in: path
@@ -7158,7 +7768,10 @@ paths:
     post:
       consumes:
       - application/json
-      description: Add a named Agent backed by a runtime descriptor
+      description: Add a named Agent backed by a runtime descriptor. Omit enabled
+        to create it enabled; pass enabled=false to hold a direct-runtime Agent back
+        until its workspace dependency preflight passes. The response reports that
+        dependency (dependency_id) when the runtime declares one.
       parameters:
       - description: Bot ID
         in: path
@@ -7226,7 +7839,8 @@ paths:
       tags:
       - bot-agents
     get:
-      description: Get one Agent attached to a bot
+      description: Get one Agent attached to a bot, including the workspace dependency
+        its runtime declares (omitted for runtimes without one).
       parameters:
       - description: Bot ID
         in: path
@@ -7259,7 +7873,7 @@ paths:
     patch:
       consumes:
       - application/json
-      description: Rename, enable, or disable an Agent; runtime metadata is immutable
+      description: Update an Agent's name, availability, or runtime configuration
       parameters:
       - description: Bot ID
         in: path
@@ -7301,6 +7915,230 @@ paths:
           schema:
             $ref: '#/definitions/apperror.Problem'
       summary: Update a bot Agent
+      tags:
+      - bot-agents
+  /bots/{bot_id}/agents/{id}/codex/login/device/authorize:
+    post:
+      parameters:
+      - description: Bot ID
+        in: path
+        name: bot_id
+        required: true
+        type: string
+      - description: Bot Agent ID
+        in: path
+        name: id
+        required: true
+        type: string
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/externalagent.CodexDeviceLoginAuthorizeResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+      summary: Start a ChatGPT device-code login for the direct codex runtime
+      tags:
+      - external-agents
+  /bots/{bot_id}/agents/{id}/codex/login/device/cancel:
+    post:
+      parameters:
+      - description: Bot ID
+        in: path
+        name: bot_id
+        required: true
+        type: string
+      - description: Login reference
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/externalagent.CodexDeviceLoginPollRequest'
+      - description: Bot Agent ID
+        in: path
+        name: id
+        required: true
+        type: string
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+      summary: Cancel a pending codex device-code login
+      tags:
+      - external-agents
+  /bots/{bot_id}/agents/{id}/codex/login/device/poll:
+    post:
+      parameters:
+      - description: Bot ID
+        in: path
+        name: bot_id
+        required: true
+        type: string
+      - description: Login reference
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/externalagent.CodexDeviceLoginPollRequest'
+      - description: Bot Agent ID
+        in: path
+        name: id
+        required: true
+        type: string
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/externalagent.CodexDeviceLoginPollResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+      summary: Poll a pending codex device-code login
+      tags:
+      - external-agents
+  /bots/{bot_id}/agents/{id}/credential:
+    delete:
+      parameters:
+      - description: Bot ID
+        in: path
+        name: bot_id
+        required: true
+        type: string
+      - description: Bot Agent ID
+        in: path
+        name: id
+        required: true
+        type: string
+      responses:
+        "204":
+          description: No Content
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+      summary: Disconnect a Bot Agent's credential
+      tags:
+      - agent-credentials
+    get:
+      parameters:
+      - description: Bot ID
+        in: path
+        name: bot_id
+        required: true
+        type: string
+      - description: Bot Agent ID
+        in: path
+        name: id
+        required: true
+        type: string
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/agentcredential.PublicCredential'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+      summary: Get the credential attached to a Bot Agent
+      tags:
+      - agent-credentials
+    put:
+      description: Creates an encrypted credential from the submitted secret and
+      parameters:
+      - description: Bot ID
+        in: path
+        name: bot_id
+        required: true
+        type: string
+      - description: Bot Agent ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Secret
+        in: body
+        name: payload
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.agentCredentialPutRequest'
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/agentcredential.PublicCredential'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+      summary: Attach a credential to a Bot Agent, replacing any previous one
+      tags:
+      - agent-credentials
+  /bots/{bot_id}/agents/{id}/models:
+    get:
+      parameters:
+      - description: Bot ID
+        in: path
+        name: bot_id
+        required: true
+        type: string
+      - description: Agent ID
+        in: path
+        name: id
+        required: true
+        type: string
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/external.ModelCatalog'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+      summary: List models available to a bot Agent
       tags:
       - bot-agents
   /bots/{bot_id}/backup/export:
@@ -9031,6 +9869,504 @@ paths:
           schema:
             $ref: '#/definitions/handlers.ErrorResponse'
       summary: Interactive WebSocket terminal for bot workspace
+      tags:
+      - containerd
+  /bots/{bot_id}/dependencies:
+    get:
+      description: Every catalog dependency (image-provided runtimes, managed agent
+        CLIs and tools) reconciled with its installation record and, when the workspace
+        is running, with what is actually installed.
+      parameters:
+      - description: Bot ID
+        in: path
+        name: bot_id
+        required: true
+        type: string
+      - description: Workspace target ID (defaults to the bot's current target)
+        in: query
+        name: workspace_target_id
+        type: string
+      - description: Refresh definitions and workspace discovery
+        in: query
+        name: refresh
+        type: boolean
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handlers.WorkspaceDependencyListResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+      summary: List workspace dependencies
+      tags:
+      - containerd
+  /bots/{bot_id}/dependencies/{dep_id}:
+    delete:
+      description: Runs the catalog remove script, deletes the generated shims, drops
+        the installation record, and streams the output. For a dependency the image
+        ships this removes the managed overlay only; the image copy becomes the one
+        in effect again.
+      parameters:
+      - description: Bot ID
+        in: path
+        name: bot_id
+        required: true
+        type: string
+      - description: Dependency ID
+        in: path
+        name: dep_id
+        required: true
+        type: string
+      - description: Workspace target ID (defaults to the bot's current target)
+        in: query
+        name: workspace_target_id
+        type: string
+      - description: Prepared definition revision (optional)
+        in: body
+        name: payload
+        schema:
+          $ref: '#/definitions/handlers.WorkspaceDependencyInstallRequest'
+      produces:
+      - text/event-stream
+      responses:
+        "200":
+          description: SSE stream of operation events
+          schema:
+            $ref: '#/definitions/handlers.WorkspaceDependencyStreamEvent'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+      summary: Remove a workspace dependency
+      tags:
+      - containerd
+  /bots/{bot_id}/dependencies/{dep_id}/install:
+    post:
+      consumes:
+      - application/json
+      description: 'Runs the catalog install script and streams its output. The optional
+        body names the version to install; without one the script installs the latest
+        version (or the manifest pin). For a dependency the image already ships this
+        installs a managed overlay that takes precedence over the image copy. A stopped
+        native workspace is started first. Events: started, log, done, error.'
+      parameters:
+      - description: Bot ID
+        in: path
+        name: bot_id
+        required: true
+        type: string
+      - description: Dependency ID
+        in: path
+        name: dep_id
+        required: true
+        type: string
+      - description: Workspace target ID (defaults to the bot's current target)
+        in: query
+        name: workspace_target_id
+        type: string
+      - description: Version to install (optional)
+        in: body
+        name: payload
+        schema:
+          $ref: '#/definitions/handlers.WorkspaceDependencyInstallRequest'
+      produces:
+      - text/event-stream
+      responses:
+        "200":
+          description: SSE stream of operation events
+          schema:
+            $ref: '#/definitions/handlers.WorkspaceDependencyStreamEvent'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+      summary: Install a workspace dependency
+      tags:
+      - containerd
+  /bots/{bot_id}/dependencies/{dep_id}/reinstall:
+    post:
+      consumes:
+      - application/json
+      description: Runs the catalog reinstall script, or remove followed by install,
+        and streams the output. The optional body names the version to install; without
+        one the script picks the latest version (or the manifest pin).
+      parameters:
+      - description: Bot ID
+        in: path
+        name: bot_id
+        required: true
+        type: string
+      - description: Dependency ID
+        in: path
+        name: dep_id
+        required: true
+        type: string
+      - description: Workspace target ID (defaults to the bot's current target)
+        in: query
+        name: workspace_target_id
+        type: string
+      - description: Version to install (optional)
+        in: body
+        name: payload
+        schema:
+          $ref: '#/definitions/handlers.WorkspaceDependencyInstallRequest'
+      produces:
+      - text/event-stream
+      responses:
+        "200":
+          description: SSE stream of operation events
+          schema:
+            $ref: '#/definitions/handlers.WorkspaceDependencyStreamEvent'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+      summary: Reinstall a workspace dependency
+      tags:
+      - containerd
+  /bots/{bot_id}/dependencies/{dep_id}/rollback:
+    post:
+      description: 'Switches the dependency back to the previous version kept in the
+        workspace. A pure data operation: nothing is downloaded and no log is streamed.'
+      parameters:
+      - description: Bot ID
+        in: path
+        name: bot_id
+        required: true
+        type: string
+      - description: Dependency ID
+        in: path
+        name: dep_id
+        required: true
+        type: string
+      - description: Workspace target ID (defaults to the bot's current target)
+        in: query
+        name: workspace_target_id
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handlers.WorkspaceDependencyOperationResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+      summary: Roll a workspace dependency back to its previous version
+      tags:
+      - containerd
+  /bots/{bot_id}/dependencies/{dep_id}/script:
+    get:
+      description: The exact stdin text the workspace shell receives, prelude included,
+        with the command, time budget, and environment the runner uses. Scripts never
+        touch the workspace disk, so this is the only way to inspect them.
+      parameters:
+      - description: Bot ID
+        in: path
+        name: bot_id
+        required: true
+        type: string
+      - description: Dependency ID
+        in: path
+        name: dep_id
+        required: true
+        type: string
+      - default: install
+        description: Action
+        enum:
+        - install
+        - update
+        - remove
+        - reinstall
+        - rollback
+        in: query
+        name: action
+        type: string
+      - description: Workspace target ID (defaults to the bot's current target)
+        in: query
+        name: workspace_target_id
+        type: string
+      - description: Keep a previously prepared definition revision
+        in: query
+        name: definition_revision
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handlers.WorkspaceDependencyScriptResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+      summary: Show the script a dependency action would run
+      tags:
+      - containerd
+  /bots/{bot_id}/dependencies/{dep_id}/update:
+    post:
+      consumes:
+      - application/json
+      description: Runs the catalog update script (or the install script when the
+        manifest has none) and streams its output. The optional body names the version
+        to update to; without one the script picks the latest version (or the manifest
+        pin). The previous version is kept for rollback.
+      parameters:
+      - description: Bot ID
+        in: path
+        name: bot_id
+        required: true
+        type: string
+      - description: Dependency ID
+        in: path
+        name: dep_id
+        required: true
+        type: string
+      - description: Workspace target ID (defaults to the bot's current target)
+        in: query
+        name: workspace_target_id
+        type: string
+      - description: Version to update to (optional)
+        in: body
+        name: payload
+        schema:
+          $ref: '#/definitions/handlers.WorkspaceDependencyInstallRequest'
+      produces:
+      - text/event-stream
+      responses:
+        "200":
+          description: SSE stream of operation events
+          schema:
+            $ref: '#/definitions/handlers.WorkspaceDependencyStreamEvent'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+      summary: Update a workspace dependency
+      tags:
+      - containerd
+  /bots/{bot_id}/dependencies/check-updates:
+    post:
+      description: Re-discovers the workspace and runs the upstream update check of
+        every installed tool dependency, then returns the refreshed list.
+      parameters:
+      - description: Bot ID
+        in: path
+        name: bot_id
+        required: true
+        type: string
+      - description: Workspace target ID (defaults to the bot's current target)
+        in: query
+        name: workspace_target_id
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handlers.WorkspaceDependencyListResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+      summary: Check workspace dependencies for updates
+      tags:
+      - containerd
+  /bots/{bot_id}/dependencies/preflight:
+    post:
+      consumes:
+      - application/json
+      description: 'Reports for each requested dependency whether a copy is installed,
+        whatever its version. Never starts the workspace: when it is not running,
+        items is empty and workspace_state says why.'
+      parameters:
+      - description: Bot ID
+        in: path
+        name: bot_id
+        required: true
+        type: string
+      - description: Workspace target ID (defaults to the bot's current target)
+        in: query
+        name: workspace_target_id
+        type: string
+      - description: Dependencies to check
+        in: body
+        name: payload
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.WorkspaceDependencyPreflightRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handlers.WorkspaceDependencyPreflightResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+      summary: Check whether dependencies are ready
       tags:
       - containerd
   /bots/{bot_id}/email-bindings:
@@ -10864,6 +12200,10 @@ paths:
           description: Not Found
           schema:
             $ref: '#/definitions/handlers.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/apperror.Problem'
       summary: Update a session
       tags:
       - sessions
@@ -11139,9 +12479,13 @@ paths:
       - compaction
   /bots/{bot_id}/sessions/{session_id}/context-lifecycle:
     get:
-      description: List run-keyed context lifecycle snapshots for a chat session;
-        sessions predating run lifecycle persistence fall back to legacy assistant
-        metadata
+      description: List run-keyed context lifecycle snapshots for a chat session,
+        newest first, with page-scoped aggregate totals (cache read/write tokens,
+        drop reasons, mutation kinds). Aggregates cover only the returned page; has_more
+        reports older turns. Sessions predating run lifecycle persistence fall back
+        to legacy assistant metadata (legacy_source). Per-fragment selection_decisions
+        are never returned; each turn's selection trace carries their rolled-up counts
+        and token costs
       parameters:
       - description: Bot ID
         in: path
@@ -11183,6 +12527,225 @@ paths:
           schema:
             $ref: '#/definitions/apperror.Problem'
       summary: Get session context lifecycle
+      tags:
+      - sessions
+  /bots/{bot_id}/sessions/{session_id}/follow-up-queue:
+    get:
+      parameters:
+      - description: Bot ID
+        in: path
+        name: bot_id
+        required: true
+        type: string
+      - description: Session ID
+        in: path
+        name: session_id
+        required: true
+        type: string
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handlers.followUpQueueResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+      summary: List pending follow-up inputs
+      tags:
+      - sessions
+    post:
+      parameters:
+      - description: Bot ID
+        in: path
+        name: bot_id
+        required: true
+        type: string
+      - description: Session ID
+        in: path
+        name: session_id
+        required: true
+        type: string
+      - description: Follow-up payload
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.enqueueQueueRequest'
+      responses:
+        "202":
+          description: Accepted
+          schema:
+            $ref: '#/definitions/handlers.followUpQueueItemResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+      summary: Enqueue follow-up input for the active session run
+      tags:
+      - sessions
+  /bots/{bot_id}/sessions/{session_id}/follow-up-queue/{item_id}:
+    delete:
+      parameters:
+      - description: Bot ID
+        in: path
+        name: bot_id
+        required: true
+        type: string
+      - description: Session ID
+        in: path
+        name: session_id
+        required: true
+        type: string
+      - description: Queue item ID
+        in: path
+        name: item_id
+        required: true
+        type: string
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+      summary: Cancel an accepted follow-up input
+      tags:
+      - sessions
+    patch:
+      parameters:
+      - description: Bot ID
+        in: path
+        name: bot_id
+        required: true
+        type: string
+      - description: Session ID
+        in: path
+        name: session_id
+        required: true
+        type: string
+      - description: Queue item ID
+        in: path
+        name: item_id
+        required: true
+        type: string
+      - description: Updated follow-up payload
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.updateQueueRequest'
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handlers.followUpQueueItemResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+      summary: Edit an accepted follow-up input
+      tags:
+      - sessions
+  /bots/{bot_id}/sessions/{session_id}/follow-up-queue/{item_id}/steer:
+    post:
+      parameters:
+      - description: Bot ID
+        in: path
+        name: bot_id
+        required: true
+        type: string
+      - description: Session ID
+        in: path
+        name: session_id
+        required: true
+        type: string
+      - description: Follow-up queue item ID
+        in: path
+        name: item_id
+        required: true
+        type: string
+      responses:
+        "202":
+          description: Accepted
+          schema:
+            $ref: '#/definitions/handlers.steerQueueItemResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+      summary: Promote an accepted follow-up input to steer the active run
+      tags:
+      - sessions
+  /bots/{bot_id}/sessions/{session_id}/follow-up-queue/reorder:
+    put:
+      parameters:
+      - description: Bot ID
+        in: path
+        name: bot_id
+        required: true
+        type: string
+      - description: Session ID
+        in: path
+        name: session_id
+        required: true
+        type: string
+      - description: Typed follow-up queue references
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.followUpQueueReorderRequest'
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handlers.followUpQueueResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+      summary: Reorder accepted follow-up inputs
       tags:
       - sessions
   /bots/{bot_id}/sessions/{session_id}/fork:
@@ -11228,6 +12791,31 @@ paths:
       summary: Fork a chat session from an assistant reply
       tags:
       - sessions
+  /bots/{bot_id}/sessions/{session_id}/queue:
+    get:
+      parameters:
+      - description: Bot ID
+        in: path
+        name: bot_id
+        required: true
+        type: string
+      - description: Session ID
+        in: path
+        name: session_id
+        required: true
+        type: string
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handlers.sessionQueueResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+      summary: List pending steer and follow-up inputs in one response
+      tags:
+      - sessions
   /bots/{bot_id}/sessions/{session_id}/status:
     get:
       description: Get aggregated info for a chat session including message count,
@@ -11267,6 +12855,187 @@ paths:
       summary: Get session info
       tags:
       - sessions
+  /bots/{bot_id}/sessions/{session_id}/steer-queue:
+    get:
+      parameters:
+      - description: Bot ID
+        in: path
+        name: bot_id
+        required: true
+        type: string
+      - description: Session ID
+        in: path
+        name: session_id
+        required: true
+        type: string
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handlers.steerQueueResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+      summary: List pending steer inputs
+      tags:
+      - sessions
+    post:
+      parameters:
+      - description: Bot ID
+        in: path
+        name: bot_id
+        required: true
+        type: string
+      - description: Session ID
+        in: path
+        name: session_id
+        required: true
+        type: string
+      - description: Steer payload
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.enqueueQueueRequest'
+      responses:
+        "202":
+          description: Accepted
+          schema:
+            $ref: '#/definitions/handlers.steerQueueItemResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+      summary: Enqueue steer input for the active session run
+      tags:
+      - sessions
+  /bots/{bot_id}/sessions/{session_id}/steer-queue/{item_id}:
+    delete:
+      parameters:
+      - description: Bot ID
+        in: path
+        name: bot_id
+        required: true
+        type: string
+      - description: Session ID
+        in: path
+        name: session_id
+        required: true
+        type: string
+      - description: Queue item ID
+        in: path
+        name: item_id
+        required: true
+        type: string
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+      summary: Cancel an accepted steer input
+      tags:
+      - sessions
+    patch:
+      parameters:
+      - description: Bot ID
+        in: path
+        name: bot_id
+        required: true
+        type: string
+      - description: Session ID
+        in: path
+        name: session_id
+        required: true
+        type: string
+      - description: Queue item ID
+        in: path
+        name: item_id
+        required: true
+        type: string
+      - description: Updated steer payload
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.updateQueueRequest'
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handlers.steerQueueItemResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+      summary: Edit an accepted steer input
+      tags:
+      - sessions
+  /bots/{bot_id}/sessions/{session_id}/steer-queue/reorder:
+    put:
+      parameters:
+      - description: Bot ID
+        in: path
+        name: bot_id
+        required: true
+        type: string
+      - description: Session ID
+        in: path
+        name: session_id
+        required: true
+        type: string
+      - description: Typed steer queue references
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.steerQueueReorderRequest'
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handlers.steerQueueResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+      summary: Reorder accepted steer inputs
+      tags:
+      - sessions
   /bots/{bot_id}/sessions/events:
     get:
       description: |-
@@ -11302,6 +13071,30 @@ paths:
       summary: Stream bot-wide sessions activity
       tags:
       - messages
+  /bots/{bot_id}/sessions/model-preference-seed:
+    get:
+      parameters:
+      - description: Bot ID
+        in: path
+        name: bot_id
+        required: true
+        type: string
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handlers.modelPreferenceSeedResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+      summary: Welcome composer model seed
+      tags:
+      - sessions
   /bots/{bot_id}/settings:
     delete:
       description: Remove agent settings for current user
@@ -13047,6 +14840,35 @@ paths:
           schema:
             $ref: '#/definitions/handlers.ErrorResponse'
       summary: Check bot name availability
+      tags:
+      - bots
+  /bots/user-access/candidates:
+    get:
+      description: List grantable workspace members before the bot exists, for the
+        create form
+      parameters:
+      - description: Search query
+        in: query
+        name: q
+        type: string
+      - description: Max results
+        in: query
+        name: limit
+        type: integer
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handlers.BotUserCandidateListResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+      summary: Search workspace member candidates for a bot being created
       tags:
       - bots
   /channels:
@@ -16243,4 +18065,59 @@ paths:
       summary: Get webhook tunnel status
       tags:
       - system
+  /workspace-dependencies/catalog:
+    get:
+      description: 'Every dependency the catalog declares, as its manifest describes
+        it: what it provides, where it installs, whether it can be installed and whether
+        the workspace image ships a baseline copy. Reads no workspace and needs no
+        bot; the Supermarket shows it before a bot is chosen.'
+      parameters:
+      - description: Refresh the remote catalog
+        in: query
+        name: refresh
+        type: boolean
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handlers.WorkspaceDependencyCatalogResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+      summary: List the workspace dependency catalog
+      tags:
+      - containerd
+  /workspace-dependencies/icons/{digest}:
+    get:
+      parameters:
+      - description: SHA-256 digest
+        in: path
+        name: digest
+        required: true
+        type: string
+      produces:
+      - image/svg+xml
+      responses:
+        "200":
+          description: OK
+          schema:
+            type: file
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/apperror.Problem'
+      summary: Read a cached verified dependency icon
+      tags:
+      - containerd
 swagger: "2.0"

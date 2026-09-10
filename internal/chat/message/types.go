@@ -170,18 +170,21 @@ type TurnReplacement struct {
 	SessionMetadata         map[string]any
 }
 
-// ACPPublication moves the session's canonical ACP publication head to the
-// round's run inside the same transaction as the round's messages. A head with
-// CheckpointReset=true is canonical but not resumable.
-type ACPPublication struct {
+// AgentPublication moves the session's canonical runtime-checkpoint head to
+// the round's run inside the same transaction as the round's messages. A head
+// with CheckpointReset=true is canonical but not resumable.
+type AgentPublication struct {
 	RunID           string
 	CheckpointReset bool
 }
 
 type RoundPersistenceOptions struct {
-	Replacement                   *TurnReplacement
-	CleanupACPDecisionProjections bool
-	ACPPublication                *ACPPublication
+	Replacement                       *TurnReplacement
+	CleanupRuntimeDecisionProjections bool
+	AgentPublication                  *AgentPublication
+	// AgentTurnID records the runtime's own turn id on the round's run in
+	// the same transaction as the messages; empty writes nothing.
+	AgentTurnID string
 }
 
 // AtomicRoundPersister writes a complete round in one transaction.
@@ -202,6 +205,13 @@ type AgentStep struct {
 
 type AgentStepPersister interface {
 	PersistAgentStep(ctx context.Context, step AgentStep) ([]Message, error)
+}
+
+// AgentReplacementPersister owns the fenced database transactions for hidden
+// retry/edit steps and their final visible-turn replacement.
+type AgentReplacementPersister interface {
+	PersistAgentReplacementStep(context.Context, AgentStep) ([]Message, error)
+	FinalizeAgentReplacement(context.Context, string, TurnReplacement, string, string) error
 }
 
 // Service defines message read/write behavior.

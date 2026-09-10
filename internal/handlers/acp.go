@@ -10,9 +10,7 @@ import (
 
 type ACPHandler struct{}
 
-func NewACPHandler() *ACPHandler {
-	return &ACPHandler{}
-}
+func NewACPHandler() *ACPHandler { return &ACPHandler{} }
 
 func (h *ACPHandler) Register(e *echo.Echo) {
 	e.GET("/acp/profiles", h.ListProfiles)

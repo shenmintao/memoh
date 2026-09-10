@@ -18,6 +18,7 @@ import (
 	"github.com/felinics/memoh/internal/acl"
 	acpclient "github.com/felinics/memoh/internal/agent/runtime/acp/client"
 	acpprofile "github.com/felinics/memoh/internal/agent/runtime/acp/profile"
+	"github.com/felinics/memoh/internal/agentcredential"
 	"github.com/felinics/memoh/internal/apperror"
 	"github.com/felinics/memoh/internal/auth"
 	"github.com/felinics/memoh/internal/bots"
@@ -29,16 +30,9 @@ import (
 	runtimeRpc "github.com/felinics/memoh/internal/rpc/runtime"
 	"github.com/felinics/memoh/internal/runtimefence"
 	"github.com/felinics/memoh/internal/workspace"
-	"github.com/felinics/memoh/internal/workspace/bridge"
 )
 
-type acpWorkspaceConfigProvider interface {
-	bridge.Provider
-	WorkspaceInfo(ctx context.Context, botID string) (bridge.WorkspaceInfo, error)
-}
-
 type botCreateWorkspace interface {
-	acpWorkspaceConfigProvider
 	SetupBotContainerWithProgress(ctx context.Context, botID string, progress workspace.ContainerSetupProgress) error
 }
 
@@ -59,13 +53,14 @@ type UsersHandler struct {
 	channelStore   *channel.Store
 	channelRuntime channel.Runtime
 	registry       *channel.Registry
-	acpWorkspace   botCreateWorkspace
+	workspaceSetup botCreateWorkspace
 	runtimeResets  runtimeResetService
+	credentials    *agentcredential.Service
 	logger         *slog.Logger
 }
 
 // NewUsersHandler creates a UsersHandler with channel identity support.
-func NewUsersHandler(log *slog.Logger, service *accounts.Service, botService *bots.Service, routeService route.Service, channelStore *channel.Store, channelRuntime channel.Runtime, registry *channel.Registry, acpWorkspace botCreateWorkspace) *UsersHandler {
+func NewUsersHandler(log *slog.Logger, service *accounts.Service, botService *bots.Service, routeService route.Service, channelStore *channel.Store, channelRuntime channel.Runtime, registry *channel.Registry, workspaceSetup botCreateWorkspace) *UsersHandler {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -76,13 +71,17 @@ func NewUsersHandler(log *slog.Logger, service *accounts.Service, botService *bo
 		channelStore:   channelStore,
 		channelRuntime: channelRuntime,
 		registry:       registry,
-		acpWorkspace:   acpWorkspace,
+		workspaceSetup: workspaceSetup,
 		logger:         log.With(slog.String("handler", "users")),
 	}
 }
 
 func (h *UsersHandler) SetRuntimeResetService(closer runtimeResetService) {
 	h.runtimeResets = closer
+}
+
+func (h *UsersHandler) SetCredentialService(service *agentcredential.Service) {
+	h.credentials = service
 }
 
 func (h *UsersHandler) Register(e *echo.Echo) {
@@ -461,17 +460,6 @@ func (h *UsersHandler) CreateBot(c echo.Context) error {
 	// async creation the workspace isn't ready yet, so skip here and let the
 	// config be written on a later settings update.
 	//
-	// The bot row already exists at this point, so a failure here must NOT fail
-	// the request: returning 500 would orphan the created bot and a client retry
-	// would create a duplicate. Log and continue — the managed ACP config can be
-	// (re)written from the bot settings page.
-	if req.Metadata != nil && req.WaitForReady {
-		if err := h.prepareACPWorkspaceConfig(c.Request().Context(), resp); err != nil {
-			h.logger.Warn("write ACP workspace config after bot create failed",
-				slog.String("bot_id", resp.ID), slog.Any("error", err))
-			c.Response().Header().Set("X-Memoh-ACP-Config-Error", headerSafeError("write ACP workspace config: "+err.Error()))
-		}
-	}
 	return c.JSON(http.StatusCreated, scrubBotForResponse(resp))
 }
 
@@ -484,9 +472,6 @@ func accountNotFound(err error) bool {
 }
 
 func createBotHTTPError(err error, ownerFromToken bool) error {
-	if errors.Is(err, workspace.ErrWorkspaceImageIncompatible) {
-		return apperror.Wrap(apperror.CodeWorkspaceImageIncompatible, err, nil)
-	}
 	if errors.Is(err, workspace.ErrWorkspaceTemplateBootstrapFailed) {
 		return apperror.Wrap(apperror.CodeWorkspaceTemplateBootstrapFailed, err, nil)
 	}
@@ -513,7 +498,7 @@ func (h *UsersHandler) createBotStream(c echo.Context, ownerID string, ownerFrom
 	if !ok {
 		return echo.NewHTTPError(http.StatusInternalServerError, "streaming not supported")
 	}
-	if h.acpWorkspace == nil {
+	if h.workspaceSetup == nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "workspace lifecycle not configured")
 	}
 
@@ -558,7 +543,7 @@ func (h *UsersHandler) createBotStream(c echo.Context, ownerID string, ownerFrom
 	lifecycleCtx, cancel := context.WithTimeout(context.WithoutCancel(c.Request().Context()), 5*time.Minute)
 	defer cancel()
 
-	if err := h.acpWorkspace.SetupBotContainerWithProgress(lifecycleCtx, bot.ID, func(event workspace.ContainerSetupEvent) {
+	if err := h.workspaceSetup.SetupBotContainerWithProgress(lifecycleCtx, bot.ID, func(event workspace.ContainerSetupEvent) {
 		switch event.Type {
 		case "pulling":
 			send(createContainerPullingEvent{Type: "pulling", Image: event.Image})
@@ -628,23 +613,8 @@ func (h *UsersHandler) createBotStream(c echo.Context, ownerID string, ownerFrom
 		sendError("bot_ready_update_failed", "bots.create.failedSubtitle", "ready status update failed: "+err.Error())
 		return nil
 	}
-	// Mirror the non-streaming path: write ACP workspace config (e.g.
-	// /data/.codex/auth.json) now that the workspace is ready. A failure here
-	// must NOT abort the stream — the bot exists and the config can be
-	// (re)written from the bot settings page.
-	if req.Metadata != nil {
-		if err := h.prepareACPWorkspaceConfig(lifecycleCtx, readyBot); err != nil {
-			h.logger.Warn("write ACP workspace config after stream bot create failed",
-				slog.String("bot_id", readyBot.ID), slog.Any("error", err))
-			sendError("workspace_config_write_failed", "bots.create.failedSubtitle", "write ACP workspace config: "+err.Error())
-		}
-	}
 	send(createBotStreamBotEvent{Type: "ready", Bot: scrubBotForResponse(readyBot)})
 	return nil
-}
-
-func headerSafeError(message string) string {
-	return strings.NewReplacer("\r", " ", "\n", " ").Replace(message)
 }
 
 // CheckBotName godoc
@@ -822,18 +792,21 @@ func (h *UsersHandler) UpdateBot(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
-	needsACPWorkspaceConfigWrite := false
 	shouldResetRuntimes := false
 	if req.Metadata != nil {
+		managedCredentialStore := h.credentials != nil && h.credentials.Configured()
+		if managedCredentialStore {
+			req.Metadata, _ = acpprofile.ScrubMetadataForExport(req.Metadata)
+		}
 		if err := h.botService.ValidateUpdate(c.Request().Context(), bot.ID, req); err != nil {
 			return updateBotHTTPError(err)
 		}
 		pending := bot
-		pending.Metadata = acpprofile.MergeSensitiveFieldsForUpdate(bot.Metadata, req.Metadata)
-		if err := validateACPManagedConfig(pending.Metadata); err != nil {
-			return echo.NewHTTPError(http.StatusBadRequest, "invalid ACP metadata: "+err.Error())
+		if managedCredentialStore {
+			pending.Metadata = req.Metadata
+		} else {
+			pending.Metadata = acpprofile.MergeSensitiveFieldsForUpdate(bot.Metadata, req.Metadata)
 		}
-		needsACPWorkspaceConfigWrite = acpManagedConfigNeedsWrite(bot.Metadata, pending.Metadata)
 		shouldResetRuntimes = acpRuntimeMetadataChanged(bot.Metadata, pending.Metadata)
 	}
 	if shouldResetRuntimes && h.runtimeResets == nil {
@@ -851,21 +824,17 @@ func (h *UsersHandler) UpdateBot(c echo.Context) error {
 		defer releaseRuntimeReset()
 		c.SetRequest(c.Request().WithContext(resetCtx))
 	}
-	resp, err := h.botService.Update(c.Request().Context(), bot.ID, req)
+	var resp bots.Bot
+	if h.credentials != nil && h.credentials.Configured() && req.Metadata != nil {
+		resp, err = h.botService.UpdateReplacingMetadata(c.Request().Context(), bot.ID, req)
+	} else {
+		resp, err = h.botService.Update(c.Request().Context(), bot.ID, req)
+	}
 	if err != nil {
 		if leaseErr := runtimefence.ResetLeaseFailure(c.Request().Context(), err); leaseErr != nil {
 			return apperror.Wrap(apperror.CodeSessionHistoryInconsistent, leaseErr, nil)
 		}
 		return updateBotHTTPError(err)
-	}
-	if req.Metadata != nil {
-		if needsACPWorkspaceConfigWrite {
-			if err := h.botService.PublishRuntimeConfig(c.Request().Context(), bot.ID, func(publishCtx context.Context) error {
-				return h.prepareACPWorkspaceConfig(publishCtx, resp)
-			}); err != nil {
-				return apperror.Wrap(apperror.CodeSessionHistoryInconsistent, err, nil)
-			}
-		}
 	}
 	return c.JSON(http.StatusOK, scrubBotForResponse(resp))
 }
@@ -906,60 +875,19 @@ func acpProfileSupportsSetupMode(profile acpprofile.Profile, mode acpclient.Setu
 	return false
 }
 
-func acpManagedConfigNeedsWrite(existing, pending map[string]any) bool {
-	for _, item := range acpprofile.List() {
-		profile, ok := acpprofile.Lookup(item.ID)
-		if !ok {
-			continue
-		}
-		before := acpprofile.ParseAgentSetup(existing, profile.ID)
-		after := acpprofile.ParseAgentSetup(pending, profile.ID)
-		if !acpWorkspaceConfigWriteTarget(after) {
-			continue
-		}
-		if !acpWorkspaceConfigWriteTarget(before) {
-			return true
-		}
-		if !strings.EqualFold(before.Mode, after.Mode) {
-			return true
-		}
-		if !stringMapEqual(before.Managed, after.Managed) {
-			return true
-		}
-	}
-	return false
-}
-
 func acpRuntimeMetadataChanged(existing, pending map[string]any) bool {
-	return !reflect.DeepEqual(acpRuntimeMetadata(existing), acpRuntimeMetadata(pending))
+	return !reflect.DeepEqual(
+		metadataSubtree(existing, acpprofile.MetadataKeyACP),
+		metadataSubtree(pending, acpprofile.MetadataKeyACP),
+	)
 }
 
-func acpRuntimeMetadata(metadata map[string]any) map[string]any {
-	acp, ok := metadata[acpprofile.MetadataKeyACP].(map[string]any)
+func metadataSubtree(metadata map[string]any, key string) map[string]any {
+	subtree, ok := metadata[key].(map[string]any)
 	if !ok {
 		return nil
 	}
-	return acp
-}
-
-func acpWorkspaceConfigWriteTarget(setup acpprofile.AgentSetup) bool {
-	if !setup.Enabled || !setup.ModeSet {
-		return false
-	}
-	mode := acpclient.SetupMode(setup.Mode)
-	return mode != acpclient.SetupModeSelf && mode != acpclient.SetupModeOAuth
-}
-
-func stringMapEqual(a, b map[string]string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for key, av := range a {
-		if b[key] != av {
-			return false
-		}
-	}
-	return true
+	return subtree
 }
 
 func updateBotHTTPError(err error) error {
@@ -970,72 +898,6 @@ func updateBotHTTPError(err error) error {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
 	return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
-}
-
-func (h *UsersHandler) prepareACPWorkspaceConfig(ctx context.Context, bot bots.Bot) error {
-	if h.acpWorkspace == nil {
-		return nil
-	}
-	type configTarget struct {
-		profile acpprofile.Profile
-		setup   acpprofile.AgentSetup
-		mode    acpclient.SetupMode
-	}
-	targets := []configTarget{}
-	for _, item := range acpprofile.List() {
-		profile, ok := acpprofile.Lookup(item.ID)
-		if !ok {
-			continue
-		}
-		setup := acpprofile.ParseAgentSetup(bot.Metadata, profile.ID)
-		if !setup.Enabled || !setup.ModeSet {
-			continue
-		}
-		mode := acpclient.SetupMode(setup.Mode)
-		if mode == acpclient.SetupModeSelf || mode == acpclient.SetupModeOAuth {
-			continue
-		}
-		targets = append(targets, configTarget{profile: profile, setup: setup, mode: mode})
-	}
-	if len(targets) == 0 {
-		return nil
-	}
-	workspaceInfo, err := h.acpWorkspace.WorkspaceInfo(ctx, bot.ID)
-	if err != nil {
-		return err
-	}
-	var client *bridge.Client
-	getClient := func() (*bridge.Client, error) {
-		if client != nil {
-			return client, nil
-		}
-		var err error
-		client, err = h.acpWorkspace.MCPClient(ctx, bot.ID)
-		return client, err
-	}
-	for _, target := range targets {
-		resolved := acpclient.ResolvedSessionContext{}
-		if target.profile.ID == acpprofile.AgentHermesID {
-			var err error
-			resolved, err = acpclient.ResolveSessionContext(acpclient.SessionContextInput{
-				AgentID:   target.profile.ID,
-				SetupMode: target.mode,
-				Backend:   workspaceInfo.Backend,
-			})
-			if err != nil {
-				return err
-			}
-		}
-		if err := acpclient.WriteManagedACPConfig(ctx, acpclient.ManagedACPConfigRequest{
-			Profile:  target.profile,
-			Setup:    target.setup,
-			Mode:     target.mode,
-			Resolved: resolved,
-		}, getClient); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // TransferBotOwner godoc

@@ -16,10 +16,6 @@
     <template v-else>
       <section class="flex-1 relative w-full px-3 sm:px-5 lg:px-8">
         <section class="absolute inset-0">
-          <div
-            aria-hidden="true"
-            class="pointer-events-none absolute inset-x-0 top-0 z-(--z-raised) h-10 bg-gradient-to-b from-surface-editor to-transparent"
-          />
           <ScrollArea
             ref="scrollContainer"
             class="h-full"
@@ -73,60 +69,66 @@
                    turns' DOM is never re-parented (see messageTurns for why
                    that is load-bearing). The send pin reserves viewport space
                    by setting an inline min-height on the LAST turn's container
-                   (see useChatScroll's Pin section). -->
+                   (see tryApplyPin in useChatScroll). -->
               <div
                 v-for="(turn, turnIndex) in messageTurns"
                 :key="turn.id"
                 :ref="turnIndex === messageTurns.length - 1 ? setLastTurnEl : undefined"
                 :style="turnReserveStyle(turn.id)"
-                class="space-y-6"
+                data-chat-turn
               >
-                <template
-                  v-for="(msg, msgIndex) in turn.messages"
-                  :key="msg.id"
+                <div
+                  data-turn-motion
+                  class="space-y-6"
                 >
-                  <ForkSourceDivider
-                    v-if="showForkSourceDividerBefore(turn.start + msgIndex)"
-                    :title="forkSourceTitle"
-                    :disabled="openingForkSource"
-                    @open-source="handleForkSourceClick"
-                  />
-
-                  <div
-                    :data-message-id="msg.id"
-                    :data-external-message-id="(msg.role === 'user' || msg.role === 'assistant') ? msg.externalMessageId : undefined"
-                    class="transition-[background-color] duration-500 scroll-mt-2 px-2 -mx-2"
-                    :class="highlightedMessageId === msg.id ? 'bg-muted/45' : ''"
-                    :data-anchor="msg.id"
+                  <template
+                    v-for="(msg, msgIndex) in turn.messages"
+                    :key="msg.id"
                   >
-                    <MessageItem
-                      :message="msg"
-                      :bot-id="currentBotId"
-                      :channel-thread="isChannelThread"
-                      :channel-platform="channelPlatform"
-                      :bot-name="currentBot?.name"
-                      :bot-avatar-url="currentBot?.avatar_url"
-                      :on-open-media="galleryOpenBySrc"
-                      :on-reply-click="handleReplyJump"
-                      :on-retry-message="handleRetryMessage"
-                      :can-retry-latest-assistant="isRetryableTurn(msg)"
-                      :can-edit-latest-user="isEditableTurn(msg)"
-                      :can-fork-assistant="canForkAssistant"
-                      :is-scrolling="isScrolling"
-                      :is-last-message="msg.id === lastMessageId"
-                      @active="onMessageActive"
-                      @edit-message="handleEditMessage"
-                      @fork-message="handleForkMessage"
+                    <ForkSourceDivider
+                      v-if="showForkSourceDividerBefore(turn.start + msgIndex)"
+                      :title="forkSourceTitle"
+                      :disabled="openingForkSource"
+                      @open-source="handleForkSourceClick"
                     />
-                  </div>
 
-                  <ForkSourceDivider
-                    v-if="showForkSourceDividerAfter(msg, turn.start + msgIndex)"
-                    :title="forkSourceTitle"
-                    :disabled="openingForkSource"
-                    @open-source="handleForkSourceClick"
-                  />
-                </template>
+                    <div
+                      :data-message-id="msg.id"
+                      :data-external-message-id="(msg.role === 'user' || msg.role === 'assistant') ? msg.externalMessageId : undefined"
+                      class="transition-[background-color] duration-500 scroll-mt-2 px-2 -mx-2"
+                      :class="highlightedMessageId === msg.id ? 'bg-muted/45' : ''"
+                      :data-anchor="msg.id"
+                    >
+                      <MessageItem
+                        :message="msg"
+                        :bot-id="currentBotId"
+                        :session-id="activeSessionId"
+                        :channel-thread="isChannelThread"
+                        :channel-platform="channelPlatform"
+                        :bot-name="currentBot?.name"
+                        :bot-avatar-url="currentBot?.avatar_url"
+                        :on-open-media="galleryOpenBySrc"
+                        :on-reply-click="handleReplyJump"
+                        :on-retry-message="handleRetryMessage"
+                        :can-retry-latest-assistant="isRetryableTurn(msg)"
+                        :can-edit-latest-user="isEditableTurn(msg)"
+                        :can-fork-assistant="canForkAssistant"
+                        :is-scrolling="isScrolling"
+                        :is-last-message="msg.id === lastMessageId"
+                        @active="onMessageActive"
+                        @edit-message="handleEditMessage"
+                        @fork-message="handleForkMessage"
+                      />
+                    </div>
+
+                    <ForkSourceDivider
+                      v-if="showForkSourceDividerAfter(msg, turn.start + msgIndex)"
+                      :title="forkSourceTitle"
+                      :disabled="openingForkSource"
+                      @open-source="handleForkSourceClick"
+                    />
+                  </template>
+                </div>
               </div>
             </div>
           </ScrollArea>
@@ -229,6 +231,7 @@
                centered. Desktop only — mobile has no scroll rail, so there the
                nudge would just push the composer off centre. -->
           <div
+            ref="composerPlacementEl"
             class="pointer-events-auto relative mx-auto w-full px-4 sm:px-6 lg:px-10 md:-translate-x-0.5"
             :class="isWelcome ? 'max-w-[44rem]' : 'max-w-[840px]'"
           >
@@ -379,6 +382,7 @@
               :command-panel="composerCommandPanel"
               :error-message="composerError"
               :pending-user-input="pendingUserInput"
+              :compacting="isCompactingSession"
               @select-command-item="selectCommandResultItem"
               @dismiss-command="clearCurrentCommandEvent"
               @reveal-composer="handleDockRevealComposer"
@@ -404,9 +408,19 @@
                 data-slot="input-group"
                 role="group"
                 class="chat-composer-edge relative flex w-full flex-wrap content-between items-end gap-1 rounded-2xl bg-surface-composer cursor-text max-md:rounded-3xl max-md:p-2.5"
-                :class="isWelcome ? 'min-h-28 p-3' : 'p-2.5 chat-composer-docked'"
+                :class="[
+                  isWelcome ? 'min-h-28 p-3' : 'p-2.5 chat-composer-docked',
+                  voiceInputState !== 'idle' ? 'chat-composer-voice' : '',
+                ]"
                 @click="handleComposerClick"
               >
+                <SessionFollowUpQueue
+                  v-if="hasRenderedSession && currentBotId && activeSessionId"
+                  :bot-id="currentBotId"
+                  :session-id="activeSessionId"
+                  :active="streaming"
+                  :refresh-key="queueRefreshKey"
+                />
                 <!-- The attachment row reveals via a grid 0fr↔1fr track so a card
                    is unveiled in place — it never translates and is always
                    clipped, so it can't overflow the box — while the composer
@@ -483,12 +497,55 @@
                   </div>
                 </Transition>
 
+                <!-- While a voice recording/transcription is in flight the
+                     composer's input row IS the voice surface: live level
+                     bars + elapsed time take the textarea's place (same
+                     min-height, so the box never jumps), and the controls row
+                     below sheds everything except the voice pair.
+                     A11y: role="status" is an implicit polite+atomic live
+                     region, so every text change inside re-announces the
+                     whole strip — the per-second timer would chatter for the
+                     entire recording. Bars and timer are aria-hidden; only
+                     the sr-only state line announces, once per transition. -->
+                <div
+                  v-if="voiceInputState !== 'idle'"
+                  role="status"
+                  :aria-label="$t('chat.voiceInput.barLabel')"
+                  class="order-none flex w-full basis-full items-center gap-2 pl-2 pr-1"
+                  :class="isWelcome ? 'min-h-12' : 'min-h-10'"
+                >
+                  <!-- Level history fills the whole row and pushes in from
+                       the RIGHT: the window length tracks the strip's pixel
+                       width, newest sample lands on the right edge, quiet
+                       history fades to dots on the left. Bar count derives
+                       from measured width (2px bar + 3px gap); heights are
+                       runtime audio data, so both stay inline px. -->
+                  <div
+                    ref="voiceStripEl"
+                    aria-hidden="true"
+                    class="flex h-8 min-w-0 flex-1 items-center gap-[3px] overflow-hidden"
+                  >
+                    <div
+                      v-for="(level, index) in voiceBars"
+                      :key="index"
+                      class="w-0.5 shrink-0 rounded-full motion-safe:transition-[height] motion-safe:duration-75"
+                      :class="level > VOICE_BAR_ACTIVE_LEVEL ? 'bg-foreground' : 'bg-muted-foreground'"
+                      :style="{ height: `${Math.max(2, Math.round(level * VOICE_BAR_MAX_PX))}px` }"
+                    />
+                  </div>
+                  <span
+                    aria-hidden="true"
+                    class="shrink-0 text-control tabular-nums text-muted-foreground"
+                  >{{ formattedVoiceSeconds }}</span>
+                  <span class="sr-only">{{ voiceInputState === 'transcribing' ? $t('chat.voiceInput.transcribing') : $t('chat.voiceInput.barLabel') }}</span>
+                </div>
                 <textarea
+                  v-else
                   ref="textareaEl"
                   v-model="inputText"
                   rows="1"
-                  :placeholder="activeChatReadOnly ? $t('chat.readonlyHint') : $t('chat.inputPlaceholder')"
-                  :disabled="!currentBotId || activeChatReadOnly || loadingMessages || voiceInputState !== 'idle'"
+                  :placeholder="composerPlaceholder"
+                  :disabled="!currentBotId || activeChatReadOnly || loadingMessages"
                   class="order-none max-h-52 w-full basis-full field-sizing-content resize-none break-words bg-transparent pl-2 pr-1 pt-2 pb-1.5 text-base leading-[var(--chat-leading)] text-foreground outline-none placeholder:text-[var(--field-placeholder)] disabled:cursor-not-allowed"
                   :class="isWelcome ? 'min-h-12' : 'min-h-10'"
                   @keydown="handleComposerKeydown"
@@ -506,7 +563,7 @@
                       variant="ghost"
                       size="icon-sm"
                       shape="circle"
-                      :disabled="!currentBotId || activeChatReadOnly || composerConfigPending"
+                      :disabled="!currentBotId || activeChatReadOnly || composerConfigPending || voiceInputState !== 'idle'"
                       :title="$t('chat.composerActions')"
                       class="order-1 self-end text-muted-foreground max-md:size-11"
                       :aria-label="$t('chat.composerActions')"
@@ -541,7 +598,7 @@
                         >
                         <span class="min-w-0 flex-1 truncate">{{ $t('chat.agentMemoh') }}</span>
                         <Check
-                          v-if="!activeIsACP"
+                          v-if="!activeIsExternalAgent"
                           class="ml-auto"
                         />
                       </DropdownMenuItem>
@@ -636,9 +693,30 @@
                 />
 
                 <!-- The controls row owns the remaining width and right-aligns,
-                     so a long model name truncates instead of overflowing. -->
-                <div class="order-3 flex min-w-0 flex-1 items-center justify-end gap-2 self-end">
-                  <Popover v-model:open="modelPopoverOpen">
+                     so a long model name truncates instead of overflowing.
+                     min-h-9 during voice: the session ring (size-9) is the row's
+                     tallest child and v-if's off while recording; without the pin
+                     the row shrinks 36→32 and the welcome card's content-between
+                     drops the freed 4px between the rows — the voice buttons
+                     visibly sink. Coupled to the ring's size-9 by design. -->
+                <div
+                  class="order-3 flex min-w-0 flex-1 items-center justify-end gap-2 self-end"
+                  :class="showSessionInfoRing && voiceInputState !== 'idle' ? 'min-h-9' : undefined"
+                >
+                  <!-- shrink-0 keeps the model name the one that truncates.
+                       Native and ACP turns persist a context lifecycle; direct
+                       runtimes own their own context, so the ring stays off. -->
+                  <SessionInfoRing
+                    v-if="showSessionInfoRing && voiceInputState === 'idle'"
+                    class="shrink-0"
+                    :visible="isVisible"
+                    :override-model-id="overrideModelId"
+                    :fallback-context-window="sessionFallbackContextWindow"
+                  />
+                  <Popover
+                    v-if="(!activeUsesExternalAgentComposer || activeUsesACPRuntime || activeUsesDirectRuntime) && voiceInputState === 'idle'"
+                    v-model:open="modelPopoverOpen"
+                  >
                     <PopoverTrigger as-child>
                       <Button
                         type="button"
@@ -653,7 +731,7 @@
                              same contract as composer-continue-on's pill. -->
                         <span class="composer-pill-content inline-flex min-w-0 items-center gap-2">
                           <Spinner
-                            v-if="composerConfigPending || acpModelsLoading"
+                            v-if="composerSpinnerVisible"
                             class="size-3.5 shrink-0"
                           />
                           <span class="min-w-0 truncate text-label text-composer-control-label">{{ modelTriggerLabel }}</span>
@@ -685,9 +763,35 @@
                         >
                           {{ $t('common.loading') }}
                         </InlineLoadingRow>
+                        <div
+                          v-else-if="directModelCatalogError"
+                          class="space-y-3 p-3"
+                        >
+                          <p class="text-body text-muted-foreground">
+                            {{ directModelCatalogError }}
+                          </p>
+                          <Button
+                            v-if="directRuntimeAuthRequired"
+                            variant="outline"
+                            size="sm"
+                            class="w-full"
+                            @click="openDirectAgentSettings"
+                          >
+                            {{ $t('bots.agent.openSettings') }}
+                          </Button>
+                          <Button
+                            v-else
+                            variant="outline"
+                            size="sm"
+                            class="w-full"
+                            @click="retryDirectModelCatalog"
+                          >
+                            {{ $t('common.retry') }}
+                          </Button>
+                        </div>
                         <template v-else>
                           <div
-                            v-if="activeUsesACPComposer && !activeIsPendingACP && acpModes.length"
+                            v-if="activeUsesACPRuntime && !activeIsPendingExternalAgent && acpModes.length"
                             class="border-b border-border p-3"
                           >
                             <div class="mb-2 text-label text-foreground">
@@ -731,9 +835,10 @@
                             :reasoning-options="composerReasoningOptions"
                             :models="composerModels"
                             :providers="composerModelProviders"
+                            :none-label="activeUsesDirectRuntime && composerDefaultModelId && composerDefaultModelId !== 'default' ? composerDefaultModelLabel : undefined"
                             model-type="chat"
                             :open="modelPopoverOpen"
-                            show-reasoning
+                            :show-reasoning="!activeUsesDirectRuntime || !!composerReasoningOptions?.length"
                             @update:model-value="onComposerModelValueSelected"
                             @update:reasoning-effort="onComposerReasoningEffortSelected"
                           />
@@ -742,7 +847,51 @@
                     </PopoverContent>
                   </Popover>
 
-                  <div class="relative size-8 max-md:size-11 shrink-0">
+                  <!-- While voice owns the composer the trailing slot holds
+                       the voice pair instead of mic/send: ✗ cancels (also
+                       aborts an in-flight transcription), ✓ stops and
+                       transcribes — the ✓ keeps the mic's filled-primary
+                       circle language so the control the user started with is
+                       the one they commit with. -->
+                  <div
+                    v-if="voiceInputState !== 'idle'"
+                    class="flex shrink-0 items-center gap-2"
+                  >
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-sm"
+                      shape="circle"
+                      :aria-label="$t('chat.voiceInput.cancel')"
+                      class="text-muted-foreground max-md:size-11"
+                      @click="cancelVoiceInput"
+                    >
+                      <X class="size-4 max-md:size-5" />
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="primary"
+                      size="icon-sm"
+                      shape="circle"
+                      :disabled="voiceInputState === 'transcribing'"
+                      :aria-label="$t('chat.voiceInput.confirm')"
+                      class="max-md:size-11"
+                      @click="stopVoiceInput"
+                    >
+                      <Spinner
+                        v-if="voiceInputState === 'transcribing'"
+                        class="size-4 max-md:size-5"
+                      />
+                      <Check
+                        v-else
+                        class="size-4 max-md:size-5"
+                      />
+                    </Button>
+                  </div>
+                  <div
+                    v-else
+                    class="relative size-8 max-md:size-11 shrink-0"
+                  >
                     <!-- Mic and send share this one slot (never both visible):
                          with nothing to send, voice input IS the affordance
                          here; typing (or attaching) hands it to send. Mic is a
@@ -750,95 +899,113 @@
                          brand stays scarce, reserved for send/stop), so the
                          slot reads as one continuous filled control that swaps
                          its glyph and meaning on the same cross-fade timing.
-                         The context-pressure ring itself is only shelved for
-                         now, not deleted — its useSessionInfo data source
-                         stays wired below (untouched) because the /compact
-                         quick action's live percentage still reads off it. -->
-                    <Button
-                      type="button"
-                      variant="primary"
-                      shape="circle"
-                      :disabled="voiceInputDisabled"
-                      :title="voiceInputLabel"
-                      :aria-label="voiceInputLabel"
-                      class="absolute inset-0 size-8 max-md:size-11 rounded-full transition-[opacity,scale] duration-200 ease-out motion-reduce:transition-none"
-                      :class="micVisible ? 'scale-100 opacity-100' : 'pointer-events-none scale-75 opacity-0'"
-                      @click="handleVoiceInput"
+
+                         Visibility (opacity / scale / pointer-events) lives on
+                         WRAPPER divs around each Button, never on the Button
+                         itself: the design system's disabled dimming is
+                         element-level opacity-40 (packages/ui AGENTS.md
+                         § Disabled), which outranks opacity-0/100 state classes
+                         in the cascade — so a disabled "hidden" button still
+                         painted at 0.4 and bled through its sibling (the mic
+                         ghost showed under the semi-transparent send while
+                         loadingMessages). Split onto two elements, the two
+                         opacity systems compound instead of fight: hidden
+                         stays hidden, while a VISIBLE disabled button still
+                         dims as designed. -->
+                    <div
+                      class="absolute inset-0 transition-[opacity,scale] duration-[188ms] ease motion-reduce:transition-none"
+                      :class="micVisible ? 'scale-100 opacity-100' : 'pointer-events-none scale-70 opacity-0'"
                     >
-                      <Spinner
-                        v-if="voiceInputState === 'transcribing'"
-                        class="size-4 max-md:size-5"
-                      />
-                      <svg
-                        v-else
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        stroke-width="2.5"
-                        stroke-linecap="round"
-                        class="size-4.5 max-md:size-5"
-                        :class="voiceInputState === 'recording' ? 'motion-safe:animate-pulse' : undefined"
-                        aria-hidden="true"
+                      <Button
+                        type="button"
+                        variant="primary"
+                        shape="circle"
+                        :disabled="voiceInputDisabled"
+                        :title="voiceInputLabel"
+                        :aria-label="voiceInputLabel"
+                        class="size-full"
+                        @click="handleVoiceInput"
                       >
-                        <!-- Relaxed envelope: the center bar spans only 14 of
-                             the 24 viewBox units — the full-18 spike made the
-                             glyph read tense. Ends are vertical ovals
-                             (2.5 × 3.5 — a hair taller than pure circles), mids
-                             hold half the max (7). The 4.5-unit gaps are
-                             untouched: denser spacing smudges at this size. -->
-                        <path d="M3 11.5v1" />
-                        <path d="M7.5 8.5v7" />
-                        <path d="M12 5v14" />
-                        <path d="M16.5 8.5v7" />
-                        <path d="M21 11.5v1" />
-                      </svg>
-                    </Button>
+                        <Spinner
+                          v-if="voiceInputState === 'transcribing'"
+                          class="size-4 max-md:size-5"
+                        />
+                        <svg
+                          v-else
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          stroke-width="2.5"
+                          stroke-linecap="round"
+                          class="size-4.5 max-md:size-5"
+                          :class="voiceInputState === 'recording' ? 'motion-safe:animate-pulse' : undefined"
+                          aria-hidden="true"
+                        >
+                          <!-- Relaxed envelope: the center bar spans only 14 of
+                               the 24 viewBox units — the full-18 spike made the
+                               glyph read tense. Ends are vertical ovals
+                               (2.5 × 3.5 — a hair taller than pure circles), mids
+                               hold half the max (7). The 4.5-unit gaps are
+                               untouched: denser spacing smudges at this size. -->
+                          <path d="M3 11.5v1" />
+                          <path d="M7.5 8.5v7" />
+                          <path d="M12 5v14" />
+                          <path d="M16.5 8.5v7" />
+                          <path d="M21 11.5v1" />
+                        </svg>
+                      </Button>
+                    </div>
                     <!-- Send and stop are one brand circle: the surface never
                          changes between the two states, only the glyph cross-fades
                          (arrow ⇄ stop square), so the button can't blink color or
                          shape mid-turn. While streaming it stays clickable to abort. -->
-                    <Button
-                      type="button"
-                      variant="brand"
-                      :disabled="streaming ? false : (!showSend || !currentBotId || activeChatReadOnly || loadingMessages || composerConfigPending || composerHasNoModel)"
-                      :aria-label="streaming ? 'Stop generating response' : 'Send message'"
-                      class="absolute inset-0 size-8 max-md:size-11 rounded-full transition-[opacity,scale] duration-200 ease-[cubic-bezier(0.34,1.56,0.64,1)] motion-reduce:transition-none"
+                    <div
+                      class="absolute inset-0 [transition:opacity_150ms_ease,scale_281ms_cubic-bezier(0.34,1.56,0.64,1)] motion-reduce:transition-none"
                       :class="sendButtonVisible ? 'scale-100 opacity-100' : 'pointer-events-none scale-0 opacity-0'"
-                      @click="streaming ? chatStore.abort(paneTarget) : handleSend()"
                     >
-                      <span
-                        class="grid size-[18px] max-md:size-5 shrink-0 place-items-center"
-                        aria-hidden="true"
+                      <Button
+                        type="button"
+                        variant="brand"
+                        shape="circle"
+                        :disabled="streaming ? false : (!showSend || !currentBotId || activeChatReadOnly || loadingMessages || composerConfigPending || composerHasNoModel)"
+                        :aria-label="streaming && showSend ? $t(composerQueueCommand?.mode === 'steer' ? 'chat.queue.enqueueSteer' : 'chat.queue.enqueueFollowUp') : (streaming ? 'Stop generating response' : 'Send message')"
+                        class="size-full"
+                        @click="handleSendButton"
                       >
-                        <svg
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          stroke="currentColor"
-                          stroke-width="2.75"
-                          stroke-linecap="round"
-                          stroke-linejoin="round"
-                          class="col-start-1 row-start-1 size-[18px] max-md:size-5 transition-opacity duration-200 ease-out motion-reduce:transition-none"
-                          :class="streaming ? 'opacity-0' : 'opacity-100'"
+                        <span
+                          class="grid size-[18px] max-md:size-5 shrink-0 place-items-center"
+                          aria-hidden="true"
                         >
-                          <path d="M12 19.5 V5" />
-                          <path d="M6 10.5 L12 4.5 L18 10.5" />
-                        </svg>
-                        <svg
-                          viewBox="0 0 24 24"
-                          fill="currentColor"
-                          class="col-start-1 row-start-1 size-4 max-md:size-4.5 transition-opacity duration-200 ease-out motion-reduce:transition-none"
-                          :class="streaming ? 'opacity-100' : 'opacity-0'"
-                        >
-                          <rect
-                            x="4"
-                            y="4"
-                            width="16"
-                            height="16"
-                            rx="3"
-                          />
-                        </svg>
-                      </span>
-                    </Button>
+                          <svg
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="2.5"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                            class="col-start-1 row-start-1 size-[18px] max-md:size-5 transition-opacity duration-200 ease-out motion-reduce:transition-none"
+                            :class="streaming ? 'opacity-0' : 'opacity-100'"
+                          >
+                            <path d="M12 19 V5.75" />
+                            <path d="M6.5 10.5 L12 5 L17.5 10.5" />
+                          </svg>
+                          <svg
+                            viewBox="0 0 24 24"
+                            fill="currentColor"
+                            class="col-start-1 row-start-1 size-4 max-md:size-4.5 transition-opacity duration-200 ease-out motion-reduce:transition-none"
+                            :class="streaming ? 'opacity-100' : 'opacity-0'"
+                          >
+                            <rect
+                              x="4"
+                              y="4"
+                              width="16"
+                              height="16"
+                              rx="3"
+                            />
+                          </svg>
+                        </span>
+                      </Button>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -863,7 +1030,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onBeforeUnmount, useTemplateRef, watch, onWatcherCleanup, nextTick, onActivated, onDeactivated } from 'vue'
+import { ref, computed, onBeforeUnmount, useTemplateRef, watch, onWatcherCleanup, nextTick, onActivated, onDeactivated, type Ref } from 'vue'
 import {
   ImagePlus,
   Paperclip,
@@ -882,15 +1049,15 @@ import {
   ShieldCheck,
 } from 'lucide-vue-next'
 import { Button, Command, CommandGroup, CommandItem, CommandKeyBridge, CommandList, CommandSeparator, Dialog, DialogContent, DialogHeader, DialogTitle, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger, InlineLoadingRow, PanePlaceholder, Popover, PopoverContent, PopoverTrigger, ScrollArea, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Spinner, menuChromeClass, toast } from '@felinic/ui'
-import { useChatStore, type ACPAgentSessionInput, type ChatMessage, type ChatWorkspaceTargetSnapshot, type SendMessageResult } from '@/store/chat-list'
+import { useChatStore, type ExternalAgentSessionInput, type ChatMessage, type ChatWorkspaceTargetSnapshot, type SendMessageResult } from '@/store/chat-list'
 import { useWorkdirsStore } from '@/store/workdirs'
 import type { BotWorkdir } from '@/composables/api/useWorkdirs'
 import { useWorkspaceTabsStore } from '@/store/workspace-tabs'
 import { storeToRefs } from 'pinia'
 import { useElementSize, useIntersectionObserver } from '@vueuse/core'
 import { useQuery } from '@pinia/colada'
-import { getAcpProfiles, getBotsByBotIdAgents, getModels, getProviders, getBotsByBotIdSettings, getBotsByBotIdWorkspaceTargets, postTranscriptionModelsByIdTest } from '@memohai/sdk'
-import type { AcpprofilePublicProfile, BotagentsBotAgent, ModelsGetResponse, ProvidersGetResponse, WorkspaceWorkspaceTarget } from '@memohai/sdk'
+import { getAcpProfiles, getBotsByBotIdAgents, getBotsByBotIdSettings, getBotsByBotIdWorkspaceTargets, postTranscriptionModelsByIdTest } from '@memohai/sdk'
+import type { AcpprofilePublicProfile, BotagentsBotAgent, WorkspaceWorkspaceTarget } from '@memohai/sdk'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import FileDropOverlay from '@/components/file-drop-overlay/index.vue'
@@ -901,33 +1068,42 @@ import MessageItem from './message-item.vue'
 import ComposerContinueOn from './composer-continue-on.vue'
 import ChatAttachmentCard from './chat-attachment-card.vue'
 import { useChatScroll } from '../composables/useChatScroll'
+import { useComposerPlacementMotion } from '../composables/useComposerPlacementMotion'
+import { useQueueTurnAnchors } from '../composables/useQueueTurnAnchors'
+import { isRuntimeContinuationUserTurn, isRuntimeSteerTurnId } from '@/store/chat/types'
 import BgTaskPill from './bg-task-pill.vue'
 import ForkSourceDivider from './fork-source-divider.vue'
 import ChatForkDialog from './chat-fork-dialog.vue'
 import ComposerDock from './composer-dock.vue'
+import SessionFollowUpQueue from './session-follow-up-queue.vue'
 import { usePendingApprovals } from '../composables/usePendingApprovals'
 import ChatScrollRail, { type ScrollRailSegment } from './chat-scroll-rail.vue'
 import { provideBgTaskBeacons } from '../composables/useBgTaskBeacons'
 import MediaGalleryLightbox from './media-gallery-lightbox.vue'
+import SessionInfoRing from './session-info-ring.vue'
 import { useSessionInfo } from '../composables/useSessionInfo'
 import ModelOptions from '@/pages/bots/components/model-options.vue'
 import { EFFORT_LABELS, REASONING_EFFORT_DISABLE, reconcileStoredEffort } from '@/pages/bots/components/reasoning-effort'
 import { useMediaGallery } from '../composables/useMediaGallery'
 import { ATTACHMENT_ANIM_MS, attachmentToFile, fileToAttachment, useComposerAttachments } from '../composables/useComposerAttachments'
 import { useComposerDrafts } from '../composables/useComposerDrafts'
+import { useUnfocusedComposerInput } from '../composables/useUnfocusedComposerInput'
+import { useComposerPair } from '../composables/useComposerPair'
 import { COMPOSER_MASK_BELOW_PX, useComposerLayout } from '../composables/useComposerLayout'
 import { provideChatViewTarget } from '../composables/useChatViewContext'
 import { provideConnectorLogos } from '../composables/useConnectorLogos'
-import { fetchSafeSkillCatalog, fetchSession, type ChatAttachment, type CommandActionError, type CommandActionListItem, type RequestedSkillSelection, type UIUserInput } from '@/composables/api/useChat'
+import { enqueueSteerQueue, enqueueFollowUpQueue, fetchSafeSkillCatalog, fetchSession, type ChatAttachment, type CommandActionError, type CommandActionListItem, type RequestedSkillSelection, type UIUserInput } from '@/composables/api/useChat'
+import { parseSessionQueueCommand, SessionQueueSubmissionGate } from './session-queue-submission'
 import { commandResultPresentation, isCommandResultItemVisible, resolveCommandResultSelection } from './slash-command-result'
-import { captureChatPaneSendContext, composerHasNoModel as hasNoComposerModel, matchesChatPaneSendContext, pinnedSubagentModelId as resolvePinnedSubagentModelId, shouldRefreshACPComposerConfig } from './chat-pane-send'
+import { captureChatPaneSendContext, clearComposerPairDraft, composerHasNoModel as hasNoComposerModel, matchesChatPaneSendContext, pinnedSubagentModelId as resolvePinnedSubagentModelId, shouldRefreshACPComposerConfig, welcomeSendConsumedDraft } from './chat-pane-send'
 import { onAuthSessionCleared } from '@/lib/auth-session'
 import { useACPRuntime } from '@/composables/useACPRuntime'
+import { useAgentModelCatalog } from '@/composables/useAgentModelCatalog'
 import { useIsMobile } from '@/composables/useIsMobile'
 import { useVirtualKeyboard } from '@/composables/useVirtualKeyboard'
 import { ACP_DEFAULT_PROJECT_MODE, ACP_DEFAULT_PROJECT_PATH, findMissingRequiredManagedField, normalizeACPAgentID, readACPAgentConfig } from '@/utils/acp'
-import { botAgentIcon, botAgentName, botAgentProvider } from '@/utils/bot-agent'
-import { resolveApiErrorMessage } from '@/utils/api-error'
+import { BOT_AGENT_RUNTIME_ACP, BOT_AGENT_RUNTIME_CLAUDE_CODE, BOT_AGENT_RUNTIME_CODEX, botAgentIcon, botAgentName, botAgentProvider, isDirectBotAgentConfigured, normalizeBotAgentRuntime } from '@/utils/bot-agent'
+import { isApiErrorCode, resolveApiErrorMessage } from '@/utils/api-error'
 import { hasBotPermission } from '@/utils/bot-permissions'
 import { workspaceTargetAvailable } from '@/utils/workspace-target'
 import { findLatestPendingChatDecision } from './chat-pending-decision'
@@ -1013,11 +1189,41 @@ const activeChatTarget = computed(() => chatStore.chatTargetFor(paneTarget.value
 const activeSession = computed(() => activeChatTarget.value.session)
 const activeChatReadOnly = computed(() => chatStore.chatReadOnlyFor(paneTarget.value))
 const activeChatCanFork = computed(() => chatStore.chatCanForkFor(paneTarget.value))
-const overrideModelId = ref('')
-const overrideReasoningEffort = ref('')
-// Set once the user picks a model in this pane, so late-arriving defaults
-// (a subagent's pinned model, bot settings) never overwrite their choice.
-const userPickedModel = ref(false)
+// The composer pair lives on the shared ChatViewEntry: same-session tabs share
+// one pair and repointing this pane swaps in the target view's own pair. Every
+// rule that changes it is in useComposerPair (registered below, once its
+// inputs exist); these accessors only bridge it to the template.
+const overrideModelId = computed({
+  get: () => paneView.value.pairModelId.value,
+  set: (value: string) => { paneView.value.pairModelId.value = value },
+})
+const overrideReasoningEffort = computed({
+  get: () => paneView.value.pairEffort.value,
+  set: (value: string) => { paneView.value.pairEffort.value = value },
+})
+
+// Show the composer loading spinner only when the load outlasts a fast
+// round-trip: sub-3s catalog loads must not flash a spinner on every pane
+// switch (user feedback, 2026-09-02). The popover's own loading row stays
+// immediate — there the user is actively waiting on an open menu.
+function useDelayedTrue(source: Ref<boolean>, delayMs: number): Ref<boolean> {
+  const visible = ref(false)
+  let timer: ReturnType<typeof setTimeout> | undefined
+  watch(source, (value) => {
+    if (value) {
+      timer ??= setTimeout(() => { visible.value = true }, delayMs)
+      return
+    }
+    if (timer) { clearTimeout(timer); timer = undefined }
+    visible.value = false
+  }, { immediate: true })
+  onBeforeUnmount(() => { if (timer) clearTimeout(timer) })
+  return visible
+}
+
+// Session creation briefly changes several pieces of the direct-runtime
+// identity. That is one draft being promoted, not a switch to another chat.
+let directDraftPromotionPending = false
 const paneComposerScope = computed(() => {
   const botId = paneTarget.value.botId
   return botId ? `${botId}:${paneTarget.value.viewId}` : 'chat'
@@ -1051,6 +1257,8 @@ const isWelcome = computed(() =>
 // where v-if would unmount them. A session panel carries its sessionId
 // from the first frame, so this gate never engages on session routes.
 const composerPlacementPending = computed(() => loadingChats.value && !hasRenderedSession.value)
+const composerPlacementEl = useTemplateRef<HTMLElement>('composerPlacementEl')
+useComposerPlacementMotion(composerPlacementEl, isWelcome)
 
 // Rotate the greeting per fresh chat so the entry point feels alive rather than
 // a fixed banner; the pick stays stable while a single welcome screen is shown
@@ -1090,17 +1298,14 @@ const canForkAssistant = computed(() =>
   !streaming.value
   && !loadingMessages.value
   && !activeChatReadOnly.value
-  && activeChatCanFork.value,
+  && activeChatCanFork.value
+  && (activeChatTarget.value.runtimeType === 'model'
+    || activeChatTarget.value.runtimeType === BOT_AGENT_RUNTIME_CODEX),
 )
 
-// ACP has no rewind primitive: the external agent keeps its own in-process
-// context, so a replaced turn stays in the agent's memory no matter what the
-// visible history shows. Retry/edit therefore cannot be implemented honestly
-// for ACP sessions and the affordances are hidden, like image upload is for
-// models without vision.
-const activeSupportsTurnReplacement = computed(() =>
-  !activeChatTarget.value.isACP && !activeChatTarget.value.isPendingACP,
-)
+// Retry/edit rewrite persisted history and replay it, which only runtimes
+// whose context Memoh itself assembles can honor.
+const activeSupportsTurnReplacement = computed(() => activeChatTarget.value.runtimeType === 'model')
 
 // The turn id, not a message id: a turn carries it from admission, so the
 // affordance is live the moment the round exists rather than after the
@@ -1140,22 +1345,6 @@ function isEditableTurn(message: ChatMessage): boolean {
   const turnId = latestEditableUserTurnId.value
   return message.role === 'user' && turnId !== '' && turnId === (message.turnId?.trim() ?? '')
 }
-
-const { data: modelData } = useQuery({
-  key: ['models'],
-  query: async () => {
-    const { data } = await getModels({ throwOnError: true })
-    return data
-  },
-})
-
-const { data: providerData } = useQuery({
-  key: ['providers'],
-  query: async () => {
-    const { data } = await getProviders({ throwOnError: true })
-    return data
-  },
-})
 
 const { data: botSettings, isLoading: botSettingsLoading } = useQuery({
   key: () => ['bot-settings', currentBotId.value],
@@ -1284,9 +1473,9 @@ const forkSourceDividerAfterIndex = computed<number | null>(() => {
   const index = messages.value.findIndex(messageMatchesForkSource)
   return index >= 0 ? index : null
 })
-const activeIsPendingACP = computed(() => activeChatTarget.value.isPendingACP)
-const activeIsACP = computed(() => activeChatTarget.value.isACP)
-const activeUsesACPComposer = computed(() => activeIsPendingACP.value || activeIsACP.value)
+const activeIsPendingExternalAgent = computed(() => activeChatTarget.value.isPendingExternalAgent)
+const activeIsExternalAgent = computed(() => activeChatTarget.value.isExternalAgent)
+const activeUsesExternalAgentComposer = computed(() => activeIsPendingExternalAgent.value || activeIsExternalAgent.value)
 // ---- workdir binding ----
 // A session bound to a bot workdir (or a draft under the bot's working
 // folder) has its workspace target pinned by that binding: the computer
@@ -1301,9 +1490,9 @@ const draftWorkingFolder = computed(() => {
   if (activeSession.value || !currentBotId.value) return null
   const workdir = workdirsStore.workingWorkdirFor(currentBotId.value)
   if (!workdir) return null
-  // ACP sessions can only bind native-workspace workdirs; a remote working
+  // External Agent sessions can only bind native-workspace workdirs; a remote working
   // workdir is skipped at creation, so don't pretend it applies here.
-  if (activeUsesACPComposer.value && workdir.target_kind === 'remote') return null
+  if (activeUsesExternalAgentComposer.value && workdir.target_kind === 'remote') return null
   return workdir
 })
 const composerFolderLocked = computed(() => (
@@ -1320,7 +1509,7 @@ const composerFolderName = computed(() => {
 // remote folder is left out rather than offered as a choice that binds nothing.
 const selectableFolders = computed(() => {
   const folders = workdirsStore.workdirsFor(currentBotId.value).filter(folder => !folder.archived && !!folder.id)
-  if (activeUsesACPComposer.value) return folders.filter(folder => folder.target_kind !== 'remote')
+  if (activeUsesExternalAgentComposer.value) return folders.filter(folder => folder.target_kind !== 'remote')
   return folders
 })
 // The picker only makes sense before the session exists; an empty folder list
@@ -1344,8 +1533,8 @@ const sendWorkspaceTargetId = computed(() => (
 ))
 
 const showComputersMenu = computed(() => (
-  !activeIsACP.value
-  && !activeIsPendingACP.value
+  !activeIsExternalAgent.value
+  && !activeIsPendingExternalAgent.value
   && canWorkspaceRead.value
   && !composerFolderLocked.value
 ))
@@ -1406,13 +1595,13 @@ function selectWorkspaceTarget(target: ValidWorkspaceTarget) {
 }
 
 watch([
-  activeIsACP,
-  activeIsPendingACP,
+  activeIsExternalAgent,
+  activeIsPendingExternalAgent,
   activeSessionMetadata,
   workspaceTargets,
   paneTarget,
 ], () => {
-  if (activeIsACP.value || activeIsPendingACP.value) {
+  if (activeIsExternalAgent.value || activeIsPendingExternalAgent.value) {
     chatStore.resetWorkspaceTargetSelection(paneTarget.value)
     return
   }
@@ -1439,9 +1628,20 @@ watch([
 }, { immediate: true })
 const activeBotAgentID = computed(() =>
   activeSession.value?.bot_agent_id?.trim()
-  || chatStore.pendingACPSessionInput?.botAgentId?.trim()
+  || chatStore.pendingExternalAgentStateFor(paneTarget.value)?.input.botAgentId?.trim()
   || '',
 )
+const activeUsesACPRuntime = computed(() => (
+  activeUsesExternalAgentComposer.value && activeChatTarget.value.runtimeType === 'acp_agent'
+))
+const activeDirectRuntime = computed(() => {
+  if (!activeUsesExternalAgentComposer.value) return ''
+  const runtime = activeChatTarget.value.runtimeType
+  if (runtime === BOT_AGENT_RUNTIME_CODEX || runtime === BOT_AGENT_RUNTIME_CLAUDE_CODE) return runtime
+  return ''
+})
+const activeUsesDirectRuntime = computed(() => activeDirectRuntime.value !== '')
+const showSessionInfoRing = computed(() => !activeUsesExternalAgentComposer.value || activeUsesACPRuntime.value)
 const activeACPAgentId = computed(() => normalizeACPAgentID(activeSessionMetadata.value.acp_agent_id))
 const activeACPProjectPath = computed(() => String(activeSessionMetadata.value.project_path ?? '').trim())
 const activeACPProjectMode = computed(() => String(activeSessionMetadata.value.acp_project_mode ?? '').trim())
@@ -1478,9 +1678,31 @@ function showForkSourceDividerBefore(index: number): boolean {
 }
 
 const activeSessionId = computed(() => paneTarget.value.sessionId ?? activeSession.value?.id ?? '')
+const queueLocalRefresh = ref(0)
+// The queue list refreshes on runtime boundaries instead of polling. A steer
+// or follow-up continuation user turn changes this signature; a local enqueue
+// bumps the counter. The composable keeps a slow fallback timer for a missed
+// event.
+//
+// Only the newest queue turn is part of the key: queue inputs are consumed in
+// order, so the latest one is the only boundary that can still move. Scanning
+// from the end keeps this computed constant-time for long transcripts instead
+// of filtering and joining every queue turn on each message change.
+const queueRefreshKey = computed(() => {
+  let latestQueueTurn = ''
+  for (let index = messages.value.length - 1; index >= 0; index -= 1) {
+    const message = messages.value[index]!
+    if (message.role !== 'user') continue
+    if (isRuntimeSteerTurnId(message.turnId) || isRuntimeContinuationUserTurn(message)) {
+      latestQueueTurn = `${message.id}\u0000${message.turnId ?? ''}`
+      break
+    }
+  }
+  return `${streaming.value ? 'live' : 'idle'}\u0000${latestQueueTurn}\u0000${queueLocalRefresh.value}`
+})
 const requestedSkills = ref<RequestedSkillSelection[]>([])
 const slashPanelSuppressedPrefix = ref('')
-const skillSlashEnabled = computed(() => !activeIsACP.value && !activeIsPendingACP.value)
+const skillSlashEnabled = computed(() => !activeIsExternalAgent.value && !activeIsPendingExternalAgent.value)
 const { data: safeSkillCatalog, isLoading: safeSkillCatalogLoading } = useQuery({
   key: () => ['bot-safe-skills-catalog', currentBotId.value ?? ''],
   query: () => fetchSafeSkillCatalog(currentBotId.value!),
@@ -1553,7 +1775,7 @@ const slashQuickActions = computed(() => [
     description: t('chat.slash.newDescription'),
     icon: SquarePen,
   },
-  ...((boundLiveACPRuntime.value || activeIsPendingACP.value)
+  ...((boundLiveACPRuntime.value || activeIsPendingExternalAgent.value)
     && acpModes.value.length > 0
     ? [{
         id: 'permission',
@@ -1572,7 +1794,7 @@ const slashQuickActions = computed(() => [
         icon: Minimize2,
       }]
     : []),
-  ...(!activeIsACP.value && !activeIsPendingACP.value
+  ...(!activeIsExternalAgent.value && !activeIsPendingExternalAgent.value
     ? [{
         id: 'model',
         label: '/model',
@@ -1595,7 +1817,8 @@ const slashPanelOpen = computed(() =>
   && !loadingMessages.value
   && inputText.value.trimStart().startsWith('/')
   && !slashPanelSuppressedPrefix.value
-  && !inputText.value.includes('\n'),
+  && !inputText.value.includes('\n')
+  && !composerQueueCommand.value?.text,
 )
 function slashMatches(label: string, description = ''): boolean {
   const query = slashQuery.value
@@ -1610,7 +1833,7 @@ const visibleSlashSkills = computed(() =>
   safeSkills.value.filter(skill => slashMatches(skill.name, skill.description ?? '')),
 )
 const composerACPAvailableCommands = computed(() => (
-  (boundLiveACPRuntime.value || activeIsPendingACP.value)
+  activeUsesACPRuntime.value && (boundLiveACPRuntime.value || activeIsPendingExternalAgent.value)
     ? acpAvailableCommands.value
     : []
 ))
@@ -1626,8 +1849,10 @@ const slashPanelHasResults = computed(() =>
 // Session usage for the /compact quick action's live description ("42% full")
 // and its availability. Shares the query key with SessionInfoRing/panel, so
 // this adds no extra fetch.
+const sessionFallbackContextWindow = computed(() => activeModel.value?.config?.context_window ?? null)
 const {
-  usedTokens: sessionUsedTokens,
+  contextTokens: sessionContextTokens,
+  compactionAvailable: sessionCompactionAvailable,
   contextWindow: sessionContextWindow,
   contextPercent: sessionContextPercent,
   isCompacting: isCompactingSession,
@@ -1637,11 +1862,11 @@ const {
   sessionId: computed(() => paneTarget.value.sessionId),
   visible: isVisible,
   overrideModelId,
-  fallbackContextWindow: computed(() => activeModel.value?.config?.context_window ?? null),
+  fallbackContextWindow: sessionFallbackContextWindow,
 })
 const sessionContextPercentKnown = computed(() => sessionContextWindow.value != null && sessionContextWindow.value > 0)
 const canCompactViaSlash = computed(() =>
-  !!activeSessionId.value && !activeIsACP.value && sessionUsedTokens.value > 0 && !isCompactingSession.value,
+  !!activeSessionId.value && sessionCompactionAvailable.value && sessionContextTokens.value > 0 && !isCompactingSession.value,
 )
 
 // Client-side quick actions run an existing UI affordance directly instead of
@@ -1692,7 +1917,7 @@ function runLocalQuickAction(id: string, text = ''): boolean {
     modelPopoverOpen.value = true
     return true
   }
-  if (id === 'permission' && activeIsPendingACP.value) {
+  if (id === 'permission' && activeIsPendingExternalAgent.value) {
     void runPendingPermission(text || '/permission')
     return true
   }
@@ -1746,10 +1971,10 @@ function selectACPAgentCommand(command: ACPAvailableCommand) {
 // be intercepted before the store send path, which would otherwise classify
 // them as skill activation and fail with requested_skill_not_found.
 function localQuickActionIDForSlash(text: string): string {
-  if (activeIsPendingACP.value && /^\/permission(?:\s|$)/i.test(text.trim())) return 'permission'
+  if (activeIsPendingExternalAgent.value && /^\/permission(?:\s|$)/i.test(text.trim())) return 'permission'
   return composerLocalQuickActionID(
     text,
-    activeIsACP.value || activeIsPendingACP.value,
+    activeIsExternalAgent.value || activeIsPendingExternalAgent.value,
   )
 }
 
@@ -1852,79 +2077,123 @@ const {
   setReasoning: setACPReasoning,
 } = useACPRuntime({
   target: paneTarget,
-  pending: activeIsPendingACP,
-  enabled: computed(() => activeUsesACPComposer.value && !!currentBotId.value),
+  pending: activeIsPendingExternalAgent,
+  enabled: computed(() => activeUsesACPRuntime.value && !!currentBotId.value),
   agentId: activeACPAgentId,
   projectPath: activeACPProjectPath,
 })
 const boundLiveACPRuntime = computed(() => {
-  return activeIsACP.value
-    && !activeIsPendingACP.value
+  return activeIsExternalAgent.value
+    && !activeIsPendingExternalAgent.value
     && isBoundACPRuntimeForTarget(acpCapabilityRuntime.value, {
       sessionId: paneTarget.value.sessionId ?? '',
       agentId: activeACPAgentId.value,
       projectPath: activeACPProjectPath.value,
-    })
+  })
 })
 
-const models = computed<ModelsGetResponse[]>(() => modelData.value ?? [])
-const providers = computed<ProvidersGetResponse[]>(() => providerData.value ?? [])
 const acpModelsLoading = computed(() =>
-  activeUsesACPComposer.value
+  activeUsesACPRuntime.value
   && !acpCapabilityRuntime.value?.models
   && (agentChanging.value || acpRuntimeEnsuring.value),
 )
-const composerConfigPending = computed(() => activeUsesACPComposer.value && (
-  agentChanging.value || acpConfigChanging.value || acpConfigPreparing.value
+const {
+  catalog: composerModelCatalog,
+  nativeModels: models,
+  isLoading: composerModelsLoading,
+  error: composerModelCatalogError,
+  refresh: refreshComposerModelCatalog,
+} = useAgentModelCatalog({
+  botId: currentBotId,
+  botAgentId: activeBotAgentID,
+  runtime: computed(() => activeChatTarget.value.runtimeType),
+  selectedModelId: overrideModelId,
+  acpModels,
+  acpCurrentModelId: currentACPModelId,
+  acpReasoningEfforts,
+  acpCurrentReasoningEffort: currentACPReasoningEffort,
+  acpLoading: computed(() => acpModelsLoading.value || acpConfigPreparing.value),
+  refreshACP: () => refreshACPComposerConfig(),
+})
+
+const directRuntimeAuthRequired = computed(() =>
+  !!activeDirectRuntime.value
+  && (
+    isApiErrorCode(composerModelCatalogError.value, 'external_runtime.auth_required')
+    || isApiErrorCode(composerModelCatalogError.value, 'agent_credential.not_found')
+    || isApiErrorCode(composerModelCatalogError.value, 'agent_credential.reauthorization_required')
+  ),
+)
+const directModelCatalogError = computed(() => {
+  if (!activeUsesDirectRuntime.value || !composerModelCatalogError.value) return ''
+  return resolveApiErrorMessage(composerModelCatalogError.value, t('bots.agent.modelsLoadFailed'))
+})
+
+const composerConfigPending = computed(() => activeUsesExternalAgentComposer.value && (
+  agentChanging.value || (activeUsesACPRuntime.value && (acpConfigChanging.value || acpConfigPreparing.value))
 ))
+const composerSpinnerVisible = useDelayedTrue(
+  computed(() => composerConfigPending.value || composerModelsLoading.value),
+  3000,
+)
 const canChangeAgent = computed(() => !streaming.value
   && !creatingSession.value
   && !composerConfigPending.value
   && messages.value.length === 0)
 
-const acpModelPickerModels = computed<ModelsGetResponse[]>(() => {
-  const adapted: ModelsGetResponse[] = []
-  for (const model of acpModels.value) {
-    const value = model.id?.trim() ?? ''
-    if (!value) continue
-    adapted.push({
-      id: value,
-      model_id: value,
-      name: model.name?.trim() || value,
-      provider_id: '',
-      type: 'chat',
-      config: {
-        description: model.description?.trim() || undefined,
-      },
-    })
-  }
-  return adapted
-})
+const composerModels = computed(() => composerModelCatalog.value.models)
+const composerModelProviders = computed(() => composerModelCatalog.value.providers)
 
-// Normalize runtime-specific model metadata into the one contract consumed by
-// Memoh's existing picker. The template stays runtime-agnostic; only this
-// adapter knows whether the values came from a native model or an ACP session.
-const composerModels = computed(() =>
-  activeUsesACPComposer.value ? acpModelPickerModels.value : models.value,
-)
-const composerModelProviders = computed(() =>
-  activeUsesACPComposer.value ? [] : providers.value,
-)
+// "Default" alone tells the user nothing — resolve what it actually means:
+// the runtime's configured model for direct runtimes, the bot's chat model
+// for the native composer. Falls back to the bare label while the catalog is
+// still loading (or, for Claude Code, when the runtime keeps its default to
+// itself).
+const composerDefaultModelId = computed(() => activeUsesDirectRuntime.value
+  ? composerModelCatalog.value.configuredModelId || composerModelCatalog.value.defaultModelId
+  : !activeUsesExternalAgentComposer.value ? botSettings.value?.chat_model_id ?? '' : '')
+const composerDefaultModelName = computed(() => {
+  const id = composerDefaultModelId.value.trim()
+  // Claude may advertise only its opaque `default` alias; that real model
+  // option already supplies the Default row, without a second empty option.
+  if (!id || id === 'default') return ''
+  const model = composerModels.value.find(m => m.id === id || m.model_id === id)
+  return model?.name || model?.model_id || id
+})
+const composerDefaultModelLabel = computed(() =>
+  composerDefaultModelName.value
+    ? t('chat.modelDefaultNamed', { model: composerDefaultModelName.value })
+    : t('chat.modelDefault'))
 const composerReasoningOptions = computed(() => {
-  if (!activeUsesACPComposer.value) return undefined
-  return acpReasoningEfforts.value.flatMap((effort) => {
+  const efforts = composerModelCatalog.value.reasoningEfforts
+  if (!efforts) return undefined
+  return efforts.flatMap((effort) => {
     const value = effort.id?.trim() ?? ''
     if (!value) return []
+    const runtimeLabel = effort.name?.trim() ?? ''
+    const translatedLabel = EFFORT_LABELS[value] ? t(EFFORT_LABELS[value]) : value
     return [{
       value,
-      label: effort.name?.trim() || value,
+      label: runtimeLabel && runtimeLabel !== value ? runtimeLabel : translatedLabel,
       description: effort.description?.trim() || undefined,
     }]
   })
 })
-const composerModelsLoading = computed(() =>
-  activeUsesACPComposer.value && (acpModelsLoading.value || acpConfigPreparing.value),
-)
+
+function openDirectAgentSettings() {
+  const botName = currentBot.value?.name || currentBot.value?.id || currentBotId.value
+  if (!botName) return
+  modelPopoverOpen.value = false
+  void router.push({
+    name: 'bot-detail',
+    params: { botName },
+    query: { tab: 'agents' },
+  })
+}
+
+function retryDirectModelCatalog() {
+  void refreshComposerModelCatalog()
+}
 
 const activeModel = computed(() => {
   const id = overrideModelId.value || botSettings.value?.chat_model_id || ''
@@ -1934,7 +2203,7 @@ const activeModel = computed(() => {
 // PDFs reach the model natively only when it carries the file-input
 // capability; without it the file lands in the workspace as a path the model
 // cannot open. Warn at attach time so the user is not surprised mid-turn.
-// ACP sessions are exempt — Claude Code / Codex read PDFs themselves.
+// External Agent sessions are exempt — Claude Code / Codex read PDFs themselves.
 const isPdfFile = (file: File) =>
   file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')
 
@@ -1944,7 +2213,7 @@ const nativePdfMaxBytes = 12 * 1024 * 1024
 
 watch(() => pendingFiles.value.length, (len, prevLen) => {
   if (len <= (prevLen ?? 0)) return
-  if (activeUsesACPComposer.value) return
+  if (activeUsesExternalAgentComposer.value) return
   const model = activeModel.value
   if (!model) return
   const added = pendingFiles.value.slice(prevLen ?? 0)
@@ -2003,7 +2272,7 @@ watch(isActive, (focused) => {
   }))
 }, { immediate: true })
 
-type DefaultACPSettings = {
+type DefaultExternalAgentSettings = {
   default_bot_agent_id?: string
   chat_runtime?: string
   chat_acp_agent_id?: string
@@ -2011,51 +2280,58 @@ type DefaultACPSettings = {
   chat_acp_project_mode?: string
 }
 
-type DefaultACPAvailability = {
-  input: ACPAgentSessionInput | null
+type DefaultExternalAgentAvailability = {
+  input: ExternalAgentSessionInput | null
   messageKey: string
   loading: boolean
 }
 
-const defaultACPAvailability = computed<DefaultACPAvailability>(() => {
-  const settings = botSettings.value as (DefaultACPSettings | undefined)
+const defaultExternalAgentAvailability = computed<DefaultExternalAgentAvailability>(() => {
+  const settings = botSettings.value as (DefaultExternalAgentSettings | undefined)
   if (!settings) {
     return { input: null, messageKey: '', loading: !!currentBotId.value && botSettingsLoading.value }
   }
-  if (settings.chat_runtime !== 'acp_agent') return { input: null, messageKey: '', loading: false }
+  if (settings.chat_runtime !== 'acp_agent' && settings.chat_runtime !== 'codex' && settings.chat_runtime !== 'claude-code') return { input: null, messageKey: '', loading: false }
   if (!hasBotPermission(currentBot.value?.current_user_permissions, 'workspace_exec')) {
-    return { input: null, messageKey: 'chat.defaultACPNoWorkspaceExec', loading: false }
+    return { input: null, messageKey: 'chat.defaultAgentNoWorkspaceExec', loading: false }
   }
   const botAgentId = settings.default_bot_agent_id?.trim() ?? ''
-  if (!botAgentId) return { input: null, messageKey: 'chat.defaultACPAgentMissing', loading: false }
+  if (!botAgentId) return { input: null, messageKey: 'chat.defaultAgentMissing', loading: false }
   if (!botAgentData.value) {
     return {
       input: null,
-      messageKey: botAgentsLoading.value ? 'chat.defaultACPLoading' : 'chat.defaultACPAgentUnavailable',
+      messageKey: botAgentsLoading.value ? 'chat.defaultExternalAgentLoading' : 'chat.defaultAgentUnavailable',
       loading: botAgentsLoading.value,
     }
   }
   const agent = botAgents.value.find(item => item.id === botAgentId)
   if (!agent || agent.enabled === false) {
-    return { input: null, messageKey: 'chat.defaultACPAgentDisabled', loading: false }
+    return { input: null, messageKey: 'chat.defaultAgentDisabled', loading: false }
   }
   const agentId = botAgentProvider(agent)
-  if (!acpProfileData.value) {
-    return {
-      input: null,
-      messageKey: acpProfilesLoading.value ? 'chat.defaultACPLoading' : 'chat.defaultACPAgentUnavailable',
-      loading: acpProfilesLoading.value,
-    }
+  const directConfigured = isDirectBotAgentConfigured(agent)
+  if (directConfigured === false) {
+    return { input: null, messageKey: 'chat.defaultAgentNotConfigured', loading: false }
   }
-  const profile = acpProfiles.value.find(item => normalizeACPAgentID(item.id) === agentId)
-  if (!profile) return { input: null, messageKey: 'chat.defaultACPAgentUnavailable', loading: false }
-  const config = readACPAgentConfig(currentBotMetadata.value, agentId)
-  if (config.setupModeSet && findMissingRequiredManagedField(profile, config.managed, config.setupMode)) {
-    return { input: null, messageKey: 'chat.defaultACPAgentNotConfigured', loading: false }
+  if (directConfigured === null) {
+    if (!acpProfileData.value) {
+      return {
+        input: null,
+        messageKey: acpProfilesLoading.value ? 'chat.defaultExternalAgentLoading' : 'chat.defaultAgentUnavailable',
+        loading: acpProfilesLoading.value,
+      }
+    }
+    const profile = acpProfiles.value.find(item => normalizeACPAgentID(item.id) === agentId)
+    if (!profile) return { input: null, messageKey: 'chat.defaultAgentUnavailable', loading: false }
+    const config = readACPAgentConfig(currentBotMetadata.value, agentId)
+    if (config.setupModeSet && findMissingRequiredManagedField(profile, config.managed, config.setupMode)) {
+      return { input: null, messageKey: 'chat.defaultAgentNotConfigured', loading: false }
+    }
   }
   return {
     input: {
       botAgentId,
+      runtime: normalizeBotAgentRuntime(agent.runtime) || BOT_AGENT_RUNTIME_ACP,
       agentId,
       projectPath: settings.chat_acp_project_path?.trim() || ACP_DEFAULT_PROJECT_PATH,
       projectMode: settings.chat_acp_project_mode?.trim() || ACP_DEFAULT_PROJECT_MODE,
@@ -2064,18 +2340,18 @@ const defaultACPAvailability = computed<DefaultACPAvailability>(() => {
     loading: false,
   }
 })
-const defaultACPSessionInput = computed(() => defaultACPAvailability.value.input)
-const defaultACPUnavailableMessage = computed(() =>
-  defaultACPAvailability.value.messageKey ? t(defaultACPAvailability.value.messageKey) : '',
+const defaultExternalAgentSessionInput = computed(() => defaultExternalAgentAvailability.value.input)
+const defaultExternalAgentUnavailableMessage = computed(() =>
+  defaultExternalAgentAvailability.value.messageKey ? t(defaultExternalAgentAvailability.value.messageKey) : '',
 )
-const defaultACPLoading = computed(() => defaultACPAvailability.value.loading)
-const defaultACPComposerError = ref('')
+const defaultExternalAgentLoading = computed(() => defaultExternalAgentAvailability.value.loading)
+const defaultExternalAgentComposerError = ref('')
 
-function clearDefaultACPComposerError() {
-  if (defaultACPComposerError.value && composerError.value === defaultACPComposerError.value) {
+function clearDefaultExternalAgentComposerError() {
+  if (defaultExternalAgentComposerError.value && composerError.value === defaultExternalAgentComposerError.value) {
     composerError.value = ''
   }
-  defaultACPComposerError.value = ''
+  defaultExternalAgentComposerError.value = ''
 }
 
 const activeModelReasoning = computed(() => activeModel.value?.reasoning)
@@ -2086,7 +2362,7 @@ const activeModelSupportsReasoning = computed(() => activeModelReasoning.value?.
 // ("None") instead of the old "Default" placeholder, which named a model that
 // does not exist.
 const composerHasNoModel = computed(() =>
-  hasNoComposerModel(activeUsesACPComposer.value, overrideModelId.value),
+  hasNoComposerModel(activeUsesExternalAgentComposer.value, overrideModelId.value),
 )
 
 const selectedModelLabel = computed(() => {
@@ -2096,11 +2372,11 @@ const selectedModelLabel = computed(() => {
   // model list can lag behind settings, and a transient gap must not read as
   // "unconfigured".
   if (overrideModelId.value) return overrideModelId.value
-  return composerHasNoModel.value ? t('common.none') : t('chat.modelDefault')
+  return composerHasNoModel.value ? t('common.none') : composerDefaultModelLabel.value
 })
 
 const selectedReasoningLabel = computed(() => {
-  if (activeUsesACPComposer.value) {
+  if (activeUsesExternalAgentComposer.value) {
     const current = overrideReasoningEffort.value
     return composerReasoningOptions.value?.find(option => option.value === current)?.label || current
   }
@@ -2109,7 +2385,7 @@ const selectedReasoningLabel = computed(() => {
 })
 
 const reasoningActive = computed(() =>
-  activeUsesACPComposer.value
+  activeUsesExternalAgentComposer.value
     ? Boolean(
         overrideReasoningEffort.value
         && composerReasoningOptions.value?.some(option => option.value === overrideReasoningEffort.value),
@@ -2138,95 +2414,53 @@ const pinnedSubagentModelId = computed(() => resolvePinnedSubagentModelId(
     .filter((id): id is string => !!id),
 ))
 
-function initFromBotSettings() {
-  if (activeUsesACPComposer.value || !botSettings.value) return
-  if (!overrideModelId.value) {
-    overrideModelId.value = pinnedSubagentModelId.value || botSettings.value.chat_model_id || ''
-  }
-  if (!overrideReasoningEffort.value) {
-    // reasoning_effort is the bot's whole reasoning decision now, including
-    // "disable"; an empty value only means settings have not loaded a tier yet,
-    // which resolves to medium the same way the backend does.
-    overrideReasoningEffort.value = botSettings.value.reasoning_effort || 'medium'
-  }
-}
-
-watch([botSettings, activeUsesACPComposer], () => initFromBotSettings(), { immediate: true })
-
-// The session summary and the model list are both fetched, so the pinned model
-// routinely lands after bot settings already seeded the default. Adopt it then
-// too — but never over a model the user picked themselves.
-watch(pinnedSubagentModelId, (pinned, previous) => {
-  if (userPickedModel.value || activeUsesACPComposer.value) return
-  if (pinned) {
-    overrideModelId.value = pinned
-    return
-  }
-  // Repointed off a subagent: hand the composer back to the bot's own default
-  // rather than leaving the agent's pinned model selected for a plain chat.
-  if (previous) overrideModelId.value = botSettings.value?.chat_model_id ?? ''
-}, { immediate: true })
+// Everything that names the namespace of the pair's model IDs. A change under
+// the same view (Agent / runtime switch on an open session, staging an external
+// Agent on a draft) drops the old pair; a plain repoint does not, since each
+// view carries its own pair.
+const pairRuntimeIdentity = computed(() => JSON.stringify([
+  activeChatTarget.value.runtimeType,
+  activeUsesExternalAgentComposer.value,
+  activeBotAgentID.value,
+  activeACPAgentId.value,
+  activeACPProjectPath.value,
+  activeACPProjectMode.value,
+]))
+// Registered before the ACP config watchers below so a reset lands before
+// reconcile re-seeds from the new runtime's own state.
+const composerPair = useComposerPair({
+  view: paneView,
+  target: paneTarget,
+  visible: isVisible,
+  botId: currentBotId,
+  activeSession,
+  botSettings,
+  pinnedSubagentModelId,
+  usesExternalAgentComposer: activeUsesExternalAgentComposer,
+  usesDirectRuntime: activeUsesDirectRuntime,
+  usesACPRuntime: activeUsesACPRuntime,
+  runtimeIdentity: pairRuntimeIdentity,
+  directCatalog: composerModelCatalog,
+  draftPromotionPending: () => directDraftPromotionPending,
+  onPreferenceConflict: (error) => {
+    composerError.value = resolveApiErrorMessage(error, t('errors.session.model_preference_conflict'))
+  },
+})
 
 // Switching models can strand the composer's override on a tier the new model
 // does not offer. An empty override is left alone: it means "inherit the bot's
 // setting", not a stranded value.
 watch(activeModelReasoning, (options) => {
-  if (activeUsesACPComposer.value) return
+  if (activeUsesExternalAgentComposer.value) return
   const current = overrideReasoningEffort.value
   if (!current || !options?.supported) return
   const next = reconcileStoredEffort(current, options)
   if (next && next !== current) overrideReasoningEffort.value = next
 }, { immediate: true })
 
-watch(currentBotId, () => {
-  overrideModelId.value = ''
-  overrideReasoningEffort.value = ''
-  userPickedModel.value = false
-})
-
-// A pane can be repointed at another session without remounting, and the model
-// a user picked belongs to the session they picked it in — clear the flag so the
-// next session's pinned model can still seed the composer.
-watch(() => paneTarget.value.sessionId, () => {
-  userPickedModel.value = false
-})
-
-watch(activeUsesACPComposer, (usesACP, previouslyUsedACP) => {
-  if (usesACP === previouslyUsedACP) return
-  overrideModelId.value = ''
-  overrideReasoningEffort.value = ''
-  userPickedModel.value = false
-  if (!usesACP) initFromBotSettings()
-})
-
-watch(activeACPAgentId, (agentID, previousAgentID) => {
-  if (!activeUsesACPComposer.value || !previousAgentID || agentID === previousAgentID) return
-  overrideModelId.value = ''
-  overrideReasoningEffort.value = ''
-})
-
-// ACP overrides describe one runtime. An ephemeral pane is repointed to a
-// different session without remounting, so without this reset the previous
-// session's selection would be pushed onto the next session's runtime by the
-// scope watcher below (registration order guarantees this reset runs first)
-// and by per-turn sends. Reconcile re-seeds the cleared values from the new
-// runtime's own current state.
-const acpSessionIdentity = computed(() => JSON.stringify([
-  paneTarget.value.botId,
-  paneTarget.value.sessionId,
-  activeACPAgentId.value,
-  activeACPProjectPath.value,
-  activeACPProjectMode.value,
-]))
-watch(acpSessionIdentity, (identity, previousIdentity) => {
-  if (!activeUsesACPComposer.value || identity === previousIdentity) return
-  overrideModelId.value = ''
-  overrideReasoningEffort.value = ''
-})
-
 function reconcileACPComposerConfig() {
   const runtime = acpCapabilityRuntime.value
-  if (!activeUsesACPComposer.value || !runtime) return
+  if (!activeUsesACPRuntime.value || !runtime) return
 
   if (runtime.models !== undefined) {
     const availableModels = new Set(
@@ -2236,6 +2470,7 @@ function reconcileACPComposerConfig() {
     if (!selectedModel || !availableModels.has(selectedModel)) {
       const currentModel = currentACPModelId.value.trim()
       overrideModelId.value = availableModels.has(currentModel) ? currentModel : ''
+      composerPair.setSource('session')
     }
   }
 
@@ -2247,6 +2482,7 @@ function reconcileACPComposerConfig() {
     if (!selectedEffort || !availableEfforts.has(selectedEffort)) {
       const currentEffort = currentACPReasoningEffort.value.trim()
       overrideReasoningEffort.value = availableEfforts.has(currentEffort) ? currentEffort : ''
+      composerPair.setSource('session')
     }
   } else {
     overrideReasoningEffort.value = ''
@@ -2258,7 +2494,7 @@ watch(acpCapabilityRuntime, () => {
 }, { immediate: true })
 
 watch(
-  () => activeUsesACPComposer.value && isVisible.value ? acpOperationScope.value : '',
+  () => activeUsesACPRuntime.value && isVisible.value ? acpOperationScope.value : '',
   (scope) => {
     if (!scope || !activeACPAgentId.value) return
     void refreshACPComposerConfig().catch((error) => {
@@ -2269,15 +2505,15 @@ watch(
 )
 
 async function refreshACPComposerConfig(): Promise<void> {
-  if (!activeUsesACPComposer.value) return
+  if (!activeUsesACPRuntime.value) return
   const desiredModelId = overrideModelId.value.trim()
   const runtime = await ensureACPRuntime(true, desiredModelId)
-  if (!runtime || !activeUsesACPComposer.value) return
+  if (!runtime || !activeUsesACPRuntime.value) return
   reconcileACPComposerConfig()
 }
 
 async function refreshACPComposerConfigAfterSelectionError(result: SendMessageResult): Promise<void> {
-  if (!shouldRefreshACPComposerConfig(result, activeUsesACPComposer.value)) return
+  if (!shouldRefreshACPComposerConfig(result, activeUsesACPRuntime.value)) return
 
   const operationScope = acpOperationScope.value
   acpConfigChangeScope.value = operationScope
@@ -2291,51 +2527,51 @@ async function refreshACPComposerConfigAfterSelectionError(result: SendMessageRe
   }
 }
 
-function pendingMatchesDefaultACP(input: ACPAgentSessionInput): boolean {
-  return activeChatTarget.value.kind === 'draft-acp'
-    && chatStore.pendingACPMatchesInput(input, paneTarget.value)
+function pendingMatchesDefaultExternalAgent(input: ExternalAgentSessionInput): boolean {
+  return activeChatTarget.value.kind === 'draft-external-agent'
+    && chatStore.pendingExternalAgentMatchesInput(input, paneTarget.value)
 }
 
-watch([defaultACPUnavailableMessage, defaultACPLoading, currentBotId, hasExplicitSessionSelection, isActive], ([message, loading, _bot, _explicit, focused]) => {
+watch([defaultExternalAgentUnavailableMessage, defaultExternalAgentLoading, currentBotId, hasExplicitSessionSelection, isActive], ([message, loading, _bot, _explicit, focused]) => {
   if (!focused) return
-  clearDefaultACPComposerError()
+  clearDefaultExternalAgentComposerError()
   if (!message || !currentBotId.value) return
   if (hasExplicitSessionSelection.value) return
   if (!loading) {
     chatStore.resetToEmptyComposer({}, paneTarget.value)
   }
-  defaultACPComposerError.value = message
+  defaultExternalAgentComposerError.value = message
   composerError.value = message
 }, { immediate: true })
 
-watch([defaultACPSessionInput, defaultACPLoading, currentBotId, hasExplicitSessionSelection, activeChatTarget, isActive], ([input, loading, _bot, _explicit, _target, focused]) => {
+watch([defaultExternalAgentSessionInput, defaultExternalAgentLoading, currentBotId, hasExplicitSessionSelection, activeChatTarget, isActive], ([input, loading, _bot, _explicit, _target, focused]) => {
   if (!focused) return
   if (!currentBotId.value) return
   if (!input) {
     if (!loading) {
-      chatStore.cacheDefaultACPSession(null)
+      chatStore.cacheDefaultExternalAgentSession(null)
     }
-    if (!loading && !hasExplicitSessionSelection.value && activeIsPendingACP.value) {
+    if (!loading && !hasExplicitSessionSelection.value && activeIsPendingExternalAgent.value) {
       chatStore.resetToEmptyComposer({}, paneTarget.value)
     }
     return
   }
-  chatStore.cacheDefaultACPSession(input)
+  chatStore.cacheDefaultExternalAgentSession(input)
   if (hasExplicitSessionSelection.value) return
-  clearDefaultACPComposerError()
-  if (pendingMatchesDefaultACP(input)) return
-  chatStore.stageDefaultACPSession(input, paneTarget.value)
+  clearDefaultExternalAgentComposerError()
+  if (pendingMatchesDefaultExternalAgent(input)) return
+  chatStore.stageDefaultExternalAgentSession(input, paneTarget.value)
 }, { immediate: true })
 
-watch([modelPopoverOpen, activeUsesACPComposer, acpOperationScope], ([open, usesACP]) => {
-  if (!open || !usesACP) return
+watch([modelPopoverOpen, activeUsesACPRuntime, acpOperationScope], ([open, usesExternalAgent]) => {
+  if (!open || !usesExternalAgent) return
   void refreshACPComposerConfig().catch((error) => {
     composerError.value = resolveApiErrorMessage(error, t('chat.agentSwitchFailed'))
   })
 })
 
-watch([slashPanelOpen, activeUsesACPComposer, acpOperationScope], ([open, usesACP]) => {
-  if (!open || !usesACP) return
+watch([slashPanelOpen, activeUsesACPRuntime, acpOperationScope], ([open, usesExternalAgent]) => {
+  if (!open || !usesExternalAgent) return
   void ensureACPRuntime().catch((error) => {
     composerError.value = resolveApiErrorMessage(error, t('chat.agentSwitchFailed'))
   })
@@ -2371,23 +2607,28 @@ function agentSwitchErrorMessage(error: unknown): string {
 async function selectBotAgent(agent: BotagentsBotAgent) {
   const botAgentId = agent.id?.trim() ?? ''
   const agentId = botAgentProvider(agent)
+  const runtime = normalizeBotAgentRuntime(agent.runtime) || BOT_AGENT_RUNTIME_ACP
   if (!botAgentId || !agentId || agentChanging.value || !canChangeAgent.value) return
   agentPopoverOpen.value = false
-  if (activeUsesACPComposer.value && botAgentId === activeBotAgentID.value) return
+  if (activeUsesExternalAgentComposer.value && botAgentId === activeBotAgentID.value) return
   agentChanging.value = true
   composerError.value = ''
   try {
     if (paneTarget.value.sessionId) {
       await withAgentSwitchTimeout(chatStore.updateCurrentSessionAgent({
         botAgentId,
+        runtime,
         agentId,
       }, paneTarget.value))
     } else {
-      chatStore.stageACPSession({
+      chatStore.stageExternalAgentSession({
         botAgentId,
+        runtime,
         agentId,
       }, {}, paneTarget.value)
-      await withAgentSwitchTimeout(chatStore.ensurePendingACPRuntime(paneTarget.value))
+      if (runtime === BOT_AGENT_RUNTIME_ACP) {
+        await withAgentSwitchTimeout(chatStore.ensurePendingACPRuntime(paneTarget.value))
+      }
     }
   } catch (error) {
     composerError.value = agentSwitchErrorMessage(error)
@@ -2401,12 +2642,12 @@ async function selectMemohAgent() {
   agentPopoverOpen.value = false
   if (!paneTarget.value.sessionId) {
     chatStore.resetToEmptyComposer({ explicitSelection: true }, paneTarget.value)
-    clearDefaultACPComposerError()
+    clearDefaultExternalAgentComposerError()
     composerError.value = ''
     pendingFiles.value = []
     return
   }
-  if (!activeIsACP.value) return
+  if (!activeIsExternalAgent.value) return
   agentChanging.value = true
   composerError.value = ''
   try {
@@ -2419,27 +2660,32 @@ async function selectMemohAgent() {
 }
 
 function onModelSelected() {
-  // The popover stays open on selection (#899) — dismissal is outside click /
-  // Esc. Here we only sanitise the effort when the new model can't reason.
+  // Switching models replaces the WHOLE pair (spec v2 P6′): the effort lands
+  // on the new model's default tier and is never carried across models.
   if (!activeModelSupportsReasoning.value) {
     overrideReasoningEffort.value = REASONING_EFFORT_DISABLE
+    return
   }
+  overrideReasoningEffort.value = activeModelReasoning.value?.default_effort?.trim() ?? ''
 }
 
 async function onComposerModelValueSelected(value: string) {
-  if (activeUsesACPComposer.value && acpConfigChanging.value) return
-  const previousModel = overrideModelId.value
-  const previousReasoningEffort = overrideReasoningEffort.value
-  userPickedModel.value = true
-  overrideModelId.value = value
-  if (!activeUsesACPComposer.value) {
-    onModelSelected()
+  if (activeUsesACPRuntime.value && acpConfigChanging.value) return
+  const previous = composerPair.snapshot()
+  if (!composerPair.selectModel(value)) return
+  if (!activeUsesExternalAgentComposer.value) {
+    onModelSelected() // the effort follows the new model before the pair is persisted
+    composerPair.persist()
+    return
+  }
+  if (activeUsesDirectRuntime.value) {
+    composerPair.persist()
     return
   }
 
   const modelId = value.trim()
   if (!modelId) {
-    overrideModelId.value = previousModel
+    composerPair.restore(previous)
     return
   }
   const operationScope = acpOperationScope.value
@@ -2450,12 +2696,11 @@ async function onComposerModelValueSelected(value: string) {
     if (runtime && acpOperationScope.value === operationScope) reconcileACPComposerConfig()
   } catch (error) {
     if (
-      activeUsesACPComposer.value
+      activeUsesExternalAgentComposer.value
       && acpOperationScope.value === operationScope
       && overrideModelId.value === value
     ) {
-      overrideModelId.value = previousModel
-      overrideReasoningEffort.value = previousReasoningEffort
+      composerPair.restore(previous)
       composerError.value = resolveApiErrorMessage(error, t('chat.modelSwitchFailed'))
     }
   } finally {
@@ -2481,7 +2726,7 @@ async function onACPModeSelected(value: unknown) {
       toast.warning(t('chat.sessionModeChanged'))
     }
   } catch (error) {
-    if (activeUsesACPComposer.value && acpOperationScope.value === operationScope) {
+    if (activeUsesExternalAgentComposer.value && acpOperationScope.value === operationScope) {
       composerError.value = resolveApiErrorMessage(error, t('chat.modeSwitchFailed'))
     }
   } finally {
@@ -2490,14 +2735,18 @@ async function onACPModeSelected(value: unknown) {
 }
 
 async function onComposerReasoningEffortSelected(value: string) {
-  if (activeUsesACPComposer.value && acpConfigChanging.value) return
-  const previousEffort = overrideReasoningEffort.value
+  if (activeUsesACPRuntime.value && acpConfigChanging.value) return
+  const previous = composerPair.snapshot()
   overrideReasoningEffort.value = value
-  if (!activeUsesACPComposer.value) return
+  composerPair.setSource('user')
+  if (!activeUsesACPRuntime.value) {
+    composerPair.persist()
+    return
+  }
 
   const effort = value.trim()
   if (!effort) {
-    overrideReasoningEffort.value = previousEffort
+    composerPair.restore(previous)
     return
   }
   const operationScope = acpOperationScope.value
@@ -2508,11 +2757,11 @@ async function onComposerReasoningEffortSelected(value: string) {
     if (runtime && acpOperationScope.value === operationScope) reconcileACPComposerConfig()
   } catch (error) {
     if (
-      activeUsesACPComposer.value
+      activeUsesExternalAgentComposer.value
       && acpOperationScope.value === operationScope
       && overrideReasoningEffort.value === value
     ) {
-      overrideReasoningEffort.value = previousEffort
+      composerPair.restore(previous)
       composerError.value = resolveApiErrorMessage(error, t('chat.reasoningSwitchFailed'))
     }
   } finally {
@@ -2528,6 +2777,13 @@ const {
 } = useMediaGallery(messages)
 
 const inputText = ref('')
+const queueSubmissionGate = new SessionQueueSubmissionGate()
+const composerQueueCommand = computed(() => parseSessionQueueCommand(inputText.value, composerACPAvailableCommands.value))
+const composerPlaceholder = computed(() => {
+  if (activeChatReadOnly.value) return t('chat.readonlyHint')
+  if (!streaming.value) return t('chat.inputPlaceholder')
+  return t('chat.queue.followUpPlaceholder')
+})
 watch(inputText, (text) => {
   const prefix = slashPanelSuppressedPrefix.value
   if (!prefix || text === prefix || text.startsWith(`${prefix} `)) return
@@ -2556,6 +2812,14 @@ const {
   continueOnExpanded,
 })
 
+useUnfocusedComposerInput({
+  textarea: textareaEl,
+  // Settings keeps the dock mounted underneath its full-screen layer.
+  enabled: () => (router.currentRoute.value.name === 'home' || router.currentRoute.value.name === 'bot')
+    && isActive.value && isVisible.value,
+  onPaste: handlePaste,
+})
+
 const showSend = computed(() => Boolean(inputText.value.trim()) || pendingFiles.value.length > 0 || requestedSkills.value.length > 0)
 
 // Whether the trailing slot shows the send button (vs. mic — see micVisible
@@ -2576,6 +2840,11 @@ const micVisible = computed(() => !sendButtonVisible.value)
 // never be proxied. voiceRequestVersion + voiceSourceBotId guard the async
 // edges: a bot switch or cancel mid-record/mid-transcribe invalidates the
 // in-flight request so a late transcript can't land in the wrong pane.
+//
+// While recording/transcribing the composer itself becomes the voice
+// surface: the input row swaps to live level bars + elapsed time, and the
+// trailing slot swaps mic/send for a ✗/✓ pair. Cancel also aborts an
+// in-flight transcription, so a hung upstream can never strand the pane.
 type VoiceInputState = 'idle' | 'recording' | 'transcribing'
 
 const voiceInputState = ref<VoiceInputState>('idle')
@@ -2599,6 +2868,83 @@ let voiceChunks: Blob[] = []
 let discardVoiceRecording = false
 let voiceSourceBotId = ''
 let voiceRequestVersion = 0
+let voiceTranscribeAbort: AbortController | null = null
+
+// Live meters for the voice surface: an AnalyserNode samples mic RMS into a
+// window of bars (~80ms cadence), a 1s timer tracks elapsed time. The window
+// length follows the strip's measured width so the history always fills the
+// row exactly. AudioContext / rAF ids are plain lets — never proxied.
+const VOICE_BAR_STRIDE_PX = 5 // one 2px bar + its 3px gap
+// Keep in sync with the h-8 strip: 32px track minus a hair of headroom.
+const VOICE_BAR_MAX_PX = 30
+// Below this level a bar reads as quiet history (muted dot), not live voice.
+const VOICE_BAR_ACTIVE_LEVEL = 0.06
+const voiceStripEl = ref<HTMLElement | null>(null)
+const { width: voiceStripWidth } = useElementSize(voiceStripEl)
+const voiceBarCount = computed(() => Math.max(1, Math.floor(voiceStripWidth.value / VOICE_BAR_STRIDE_PX)))
+const voiceBars = ref<number[]>([])
+const voiceSeconds = ref(0)
+let voiceAudioCtx: AudioContext | null = null
+let voiceMeterFrame = 0
+let voiceTimer: ReturnType<typeof setInterval> | null = null
+
+// Resize the history window in place when the strip changes width: keep the
+// newest samples, pad quiet dots on the left when the row grows.
+watch(voiceBarCount, (count) => {
+  const bars = voiceBars.value
+  if (bars.length === count) return
+  voiceBars.value = bars.length > count
+    ? bars.slice(bars.length - count)
+    : [...Array(count - bars.length).fill(0), ...bars]
+})
+
+const formattedVoiceSeconds = computed(() => {
+  const minutes = Math.floor(voiceSeconds.value / 60)
+  const rest = voiceSeconds.value % 60
+  return `${minutes}:${String(rest).padStart(2, '0')}`
+})
+
+function startVoiceMeters(stream: MediaStream) {
+  voiceBars.value = Array(voiceBarCount.value).fill(0)
+  voiceSeconds.value = 0
+  const audioCtx = new AudioContext()
+  // The mic-permission prompt can outlast transient activation (and Safari
+  // starts suspended regardless) — without resume() the bars stay flat dots
+  // for the whole session. Everything else works either way.
+  void audioCtx.resume().catch(() => {})
+  const analyser = audioCtx.createAnalyser()
+  analyser.fftSize = 1024
+  analyser.smoothingTimeConstant = 0.5
+  audioCtx.createMediaStreamSource(stream).connect(analyser)
+  voiceAudioCtx = audioCtx
+  const dataArray = new Float32Array(analyser.fftSize)
+  let lastSample = 0
+  const tick = (now: number) => {
+    if (voiceAudioCtx !== audioCtx) return
+    analyser.getFloatTimeDomainData(dataArray)
+    if (now - lastSample >= 80) {
+      lastSample = now
+      let sum = 0
+      for (let i = 0; i < dataArray.length; i++) sum += dataArray[i] ** 2
+      const rms = Math.sqrt(sum / dataArray.length)
+      voiceBars.value = [...voiceBars.value.slice(1), Math.min(1, rms * 8)]
+    }
+    voiceMeterFrame = requestAnimationFrame(tick)
+  }
+  voiceMeterFrame = requestAnimationFrame(tick)
+  voiceTimer = setInterval(() => { voiceSeconds.value += 1 }, 1000)
+}
+
+function stopVoiceMeters() {
+  cancelAnimationFrame(voiceMeterFrame)
+  if (voiceTimer) {
+    clearInterval(voiceTimer)
+    voiceTimer = null
+  }
+  const audioCtx = voiceAudioCtx
+  voiceAudioCtx = null
+  if (audioCtx) void audioCtx.close().catch(() => {})
+}
 
 function releaseVoiceStream() {
   voiceStream?.getTracks().forEach(track => track.stop())
@@ -2649,10 +2995,15 @@ async function transcribeVoiceInput(
     { type: mimeType || 'audio/webm' },
   )
 
+  // Cancellable: ✗ aborts this request — without it a hung upstream would
+  // hold the transcribing state until the edge times out.
+  const controller = new AbortController()
+  voiceTranscribeAbort = controller
   try {
     const { data } = await postTranscriptionModelsByIdTest({
       path: { id: modelId },
       body: { file },
+      signal: controller.signal,
       throwOnError: true,
     })
     if (voiceRequestVersion !== requestVersion || currentBotId.value !== sourceBotId) return
@@ -2663,12 +3014,17 @@ async function transcribeVoiceInput(
     }
     const draft = inputText.value.trimEnd()
     inputText.value = draft ? `${draft} ${transcript}` : transcript
+    // Leave the voice surface BEFORE focusing: the textarea only remounts
+    // once the state is idle — focusing first hits a null ref and silently
+    // does nothing (the finally would clear the state one tick too late).
+    voiceInputState.value = 'idle'
     await nextTick()
     focusTextarea()
   } catch (error) {
     if (voiceRequestVersion !== requestVersion) return
     toast.error(resolveApiErrorMessage(error, t('chat.voiceInput.failed')))
   } finally {
+    if (voiceTranscribeAbort === controller) voiceTranscribeAbort = null
     if (voiceRequestVersion === requestVersion) voiceInputState.value = 'idle'
   }
 }
@@ -2681,12 +3037,15 @@ function stopVoiceInput() {
 function cancelVoiceInput() {
   voiceRequestVersion += 1
   discardVoiceRecording = true
+  voiceTranscribeAbort?.abort()
+  voiceTranscribeAbort = null
   if (voiceRecorder?.state === 'recording') {
     voiceRecorder.stop()
   } else {
     voiceRecorder = null
     voiceChunks = []
     releaseVoiceStream()
+    stopVoiceMeters()
     voiceInputState.value = 'idle'
   }
 }
@@ -2717,11 +3076,14 @@ async function startVoiceInput() {
       return
     }
     const mimeType = preferredVoiceMimeType()
+    // Publish the stream BEFORE constructing the recorder: if the
+    // MediaRecorder constructor throws (Safari isTypeSupported/constructor
+    // disagree), the catch can only stop tracks through voiceStream.
+    voiceStream = stream
     const recorder = mimeType
       ? new MediaRecorder(stream, { mimeType })
       : new MediaRecorder(stream)
 
-    voiceStream = stream
     voiceRecorder = recorder
     voiceChunks = []
     discardVoiceRecording = false
@@ -2739,6 +3101,7 @@ async function startVoiceInput() {
         voiceRecorder = null
         voiceChunks = []
         releaseVoiceStream()
+        stopVoiceMeters()
         voiceInputState.value = 'idle'
       }
     }
@@ -2750,6 +3113,7 @@ async function startVoiceInput() {
       voiceRecorder = null
       voiceChunks = []
       releaseVoiceStream()
+      stopVoiceMeters()
       if (shouldDiscard || !chunks.length) {
         voiceInputState.value = 'idle'
         return
@@ -2759,11 +3123,22 @@ async function startVoiceInput() {
     }
 
     recorder.start()
+    startVoiceMeters(stream)
     voiceInputState.value = 'recording'
   } catch (error) {
     if (voiceRequestVersion !== requestVersion) return
+    // recorder.start() succeeded but the meter setup threw right after: the
+    // recorder is still capturing. Route it through onstop (flagged discard)
+    // so it cleans up instead of transcribing behind the error toast.
+    if (voiceRecorder?.state === 'recording') {
+      discardVoiceRecording = true
+      voiceRecorder.stop()
+    } else {
+      voiceRecorder = null
+      voiceChunks = []
+    }
     releaseVoiceStream()
-    voiceRecorder = null
+    stopVoiceMeters()
     voiceInputState.value = 'idle'
     const denied = error instanceof DOMException
       && (error.name === 'NotAllowedError' || error.name === 'SecurityError')
@@ -2908,10 +3283,12 @@ const {
   suppressAutoScrollForPrepend,
   markEscaped,
   pinAfterSend,
+  pinAfterSteer,
+  pinAfterFollowUp,
   onActivatedRestoreScroll,
   onDeactivatedResetScroll,
   onMessageActive,
-  startScrollTween,
+  startSmoothScroll,
   findMessageElement,
   messageJumpTarget,
   turnReserveStyle,
@@ -2923,6 +3300,8 @@ const {
   isActive: isVisible,
   sessionId: computed(() => paneTarget.value.sessionId ?? `draft:${paneTarget.value.viewId}`),
 })
+
+useQueueTurnAnchors(messages, pinAfterSteer, pinAfterFollowUp)
 const showJumpToBottom = computed(() => showJumpToBottomFromScroll.value && !loadingChats.value)
 
 // Rail navigation parks the reader on a chosen turn, so escape follow —
@@ -2936,7 +3315,7 @@ function handleRailJump(seg: ScrollRailSegment) {
     const target = findMessageElement(seg.id)
     if (!root || !target) return
     markEscaped()
-    startScrollTween(root, () => messageJumpTarget(root, seg.id))
+    startSmoothScroll(root, () => messageJumpTarget(root, seg.id))
   })
 }
 
@@ -3078,12 +3457,15 @@ function handleComposerKeydown(e: KeyboardEvent) {
 async function handleRetryMessage(turnId: string) {
   if (composerConfigPending.value) return
   composerError.value = ''
+  const { pair: sendPair, finish: finishPairSend } = composerPair.beginSend()
   const result = await chatStore.retryLatestAssistant(turnId, {
     target: paneTarget.value,
-    modelId: overrideModelId.value,
-    reasoningEffort: overrideReasoningEffort.value,
+    modelId: sendPair.modelId,
+    reasoningEffort: sendPair.reasoningEffort,
     workspaceTargetId: sendWorkspaceTargetId.value,
-  })
+    onModelPreferenceSettled: () => finishPairSend(false),
+  }).finally(() => finishPairSend(false))
+  finishPairSend(result.ok || result.stage === 'stream')
   await refreshACPComposerConfigAfterSelectionError(result)
   if (!result.ok && result.error) {
     composerError.value = result.error
@@ -3096,13 +3478,16 @@ async function handleEditMessage(turnId: string, text: string, done?: (started: 
     return
   }
   composerError.value = ''
+  const { pair: sendPair, finish: finishPairSend } = composerPair.beginSend()
   try {
     const result = await chatStore.editLatestUser(turnId, text, {
       target: paneTarget.value,
-      modelId: overrideModelId.value,
-      reasoningEffort: overrideReasoningEffort.value,
+      modelId: sendPair.modelId,
+      reasoningEffort: sendPair.reasoningEffort,
       workspaceTargetId: sendWorkspaceTargetId.value,
+      onModelPreferenceSettled: () => finishPairSend(false),
     })
+    finishPairSend(result.ok || result.stage === 'stream')
     await refreshACPComposerConfigAfterSelectionError(result)
     if (!result.ok && result.error) {
       composerError.value = result.error
@@ -3110,6 +3495,8 @@ async function handleEditMessage(turnId: string, text: string, done?: (started: 
     done?.(result.ok || result.stage === 'stream')
   } catch {
     done?.(false)
+  } finally {
+    finishPairSend(false)
   }
 }
 
@@ -3121,9 +3508,59 @@ async function handleSend() {
   const text = inputText.value.trim()
   const files = [...pendingFiles.value]
   const skills = [...requestedSkills.value]
+  const queueCommand = composerQueueCommand.value
+  if (queueCommand) {
+    if (files.length || skills.length) {
+      composerError.value = files.length
+        ? t('chat.slash.attachmentsUnsupported')
+        : t('chat.slash.errorMessages.invalid_skill_slash_syntax')
+      return
+    }
+    if (!queueCommand.text || !activeSessionId.value) {
+      composerError.value = t('errors.queue_request_invalid')
+      return
+    }
+  }
+  if (streaming.value || queueCommand) {
+    if (!text || files.length || skills.length || !currentBotId.value || !activeSessionId.value || activeChatReadOnly.value) return
+    const botId = currentBotId.value
+    const sessionId = activeSessionId.value
+    const mode = queueCommand?.mode ?? 'follow-up'
+    const queueText = queueCommand?.text ?? text
+    const sentDraftKey = inputDraftKey.value
+    const sentContext = captureChatPaneSendContext(
+      paneTarget.value,
+      inputDraftKey.value || 'chat',
+    )
+    const submission = queueSubmissionGate.begin({ botId, sessionId, mode, text: queueText })
+    if (!submission) return
+
+    composerError.value = ''
+    inputText.value = ''
+    saveInputDraft(sentDraftKey, '')
+    try {
+      const enqueue = mode === 'steer' ? enqueueSteerQueue : enqueueFollowUpQueue
+      await enqueue(botId, sessionId, queueText, submission.invocationId)
+      queueSubmissionGate.succeed(submission)
+      queueLocalRefresh.value++
+    } catch (error) {
+      queueSubmissionGate.fail(submission)
+      if (matchesChatPaneSendContext(
+        sentContext,
+        paneTarget.value,
+        inputDraftKey.value || 'chat',
+      )) {
+        if (!inputText.value.trim()) {
+          inputText.value = text
+          saveInputDraft(sentDraftKey, text)
+        }
+        composerError.value = resolveApiErrorMessage(error, t('chat.sendFailed'))
+      }
+    }
+    return
+  }
   if (
     (!text && !files.length && !skills.length)
-    || streaming.value
     || loadingMessages.value
     || activeChatReadOnly.value
     || composerConfigPending.value
@@ -3139,8 +3576,8 @@ async function handleSend() {
     return
   }
   const isNewCommand = /^\/new(?:\s|$)/i.test(text)
-  if (defaultACPComposerError.value && !hasExplicitSessionSelection.value && !isNewCommand) {
-    composerError.value = defaultACPComposerError.value
+  if (defaultExternalAgentComposerError.value && !hasExplicitSessionSelection.value && !isNewCommand) {
+    composerError.value = defaultExternalAgentComposerError.value
     return
   }
   const sentDraftKey = inputDraftKey.value
@@ -3148,9 +3585,11 @@ async function handleSend() {
     paneTarget.value,
     inputDraftKey.value || 'chat',
   )
-  const sentModelId = overrideModelId.value
-  const sentReasoningEffort = overrideReasoningEffort.value
+  const pairSend = composerPair.captureSend()
+  const sentModelId = pairSend.pair.modelId
+  const sentReasoningEffort = pairSend.pair.reasoningEffort
   const sentWorkspaceTargetId = sendWorkspaceTargetId.value
+  const preserveDirectDraftSelection = activeUsesDirectRuntime.value && !sentContext.target.sessionId
   composerError.value = ''
   inputText.value = ''
   saveInputDraft(sentDraftKey, '')
@@ -3163,6 +3602,7 @@ async function handleSend() {
       attachments = await Promise.all(files.map(fileToAttachment))
     }
   } catch (error) {
+    pairSend.releaseReads()
     if (!matchesChatPaneSendContext(
       sentContext,
       paneTarget.value,
@@ -3179,6 +3619,7 @@ async function handleSend() {
   // setup and is about to start a real turn. Command-only sends therefore do
   // not leave a latent pin behind; startup failures roll the arm back.
   let rollbackPin: (() => void) | null = null
+  directDraftPromotionPending = preserveDirectDraftSelection
   const result = await chatStore.sendMessage(text, attachments, {
     target: sentContext.target,
     modelId: sentModelId,
@@ -3186,10 +3627,15 @@ async function handleSend() {
     workspaceTargetId: sentWorkspaceTargetId,
     requestedSkills: skills,
     composerScope: sentContext.composerScope,
-    onBeforeTurnAppend: () => {
+    onBeforeMessageSend: () => pairSend.begin(),
+    onModelPreferenceSettled: () => pairSend.finish(false),
+    onBeforeTurnAppend: (target) => {
+      if (preserveDirectDraftSelection) {
+        void nextTick(() => { directDraftPromotionPending = false })
+      }
       if (!matchesChatPaneSendContext(
-        sentContext,
-        paneTarget.value,
+        { ...sentContext, target },
+        { ...paneTarget.value, sessionId: paneView.value.sessionId },
         inputDraftKey.value || 'chat',
       )) return
       rollbackPin = pinAfterSend()
@@ -3198,8 +3644,13 @@ async function handleSend() {
       rollbackPin?.()
       rollbackPin = null
     },
+  }).finally(() => {
+    directDraftPromotionPending = false
+    pairSend.finish(false)
+    pairSend.releaseReads()
   })
   rollbackPin = null
+  pairSend.finish(result.messageSent === true || result.stage === 'stream')
   await refreshACPComposerConfigAfterSelectionError(result)
   if (!result.ok && result.stage === 'startup') {
     const restoreInput = result.restoreInput ?? text
@@ -3215,6 +3666,23 @@ async function handleSend() {
     if (commandPanelEvent.value?.type !== 'command_error') {
       composerError.value = result.error || t('chat.sendFailed')
     }
+    return
+  }
+  // The draft is consumed only here: a welcome send succeeded, so the pair
+  // now lives server-side (spec P2′). Clearing any earlier — e.g. on a
+  // welcome→session repoint — would wipe an unsent pick when the user merely
+  // opens a historical session; a failed send keeps the draft for the retry.
+  if (welcomeSendConsumedDraft(sentContext.target, result)) {
+    clearComposerPairDraft(sentContext.target.botId)
   }
 }
+
+function handleSendButton() {
+  if (streaming.value && !showSend.value) {
+    chatStore.abort(paneTarget.value)
+    return
+  }
+  void handleSend()
+}
+
 </script>

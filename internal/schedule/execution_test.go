@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -17,10 +18,11 @@ import (
 )
 
 const (
-	execTestBotID     = "11111111-1111-1111-1111-111111111111"
-	execTestSessionID = "22222222-2222-2222-2222-222222222222"
-	execTestModelID   = "33333333-3333-3333-3333-333333333333"
-	execTestWorkdirID = "44444444-4444-4444-4444-444444444444"
+	execTestBotID        = "11111111-1111-1111-1111-111111111111"
+	execTestSessionID    = "22222222-2222-2222-2222-222222222222"
+	execTestModelID      = "33333333-3333-3333-3333-333333333333"
+	execTestWorkdirID    = "44444444-4444-4444-4444-444444444444"
+	execTestCredentialID = "55555555-5555-5555-5555-555555555555"
 )
 
 // executionQueries fakes the lookups normalizeExecution performs.
@@ -312,13 +314,13 @@ func TestNormalizeExecutionWorkdirRules(t *testing.T) {
 		}
 	})
 
-	t.Run("acp runtime rejects remote workdir", func(t *testing.T) {
+	t.Run("external runtimes reject remote workdir", func(t *testing.T) {
 		svc := newExecutionService(t, &executionQueries{}, remote)
-		_, err := svc.normalizeExecution(ctx, execTestBotID, ExecutionConfig{
-			RuntimeType: RuntimeACPAgent, ACPAgentID: "codex", WorkdirID: execTestWorkdirID,
-		})
-		if err == nil || !strings.Contains(err.Error(), "remote") {
-			t.Fatalf("error = %v, want remote workdir rejection", err)
+		for _, runtimeType := range []string{"acp_agent", "codex", "claude-code"} {
+			err := svc.validateWorkdirBinding(ctx, execTestBotID, execTestWorkdirID, runtimeType)
+			if err == nil || !strings.Contains(err.Error(), "remote") {
+				t.Fatalf("runtime %q error = %v, want remote workdir rejection", runtimeType, err)
+			}
 		}
 	})
 
@@ -393,4 +395,33 @@ func TestNormalizeExecutionRequiresModelWithoutBotDefault(t *testing.T) {
 			t.Fatalf("normalizeExecution() error = %v", err)
 		}
 	})
+}
+
+// Direct external agent bot agents (codex, claude-code) schedule like ACP
+// ones: the resolved runtime type rides the schedule row and the fire
+// dispatches through the external driver. resolveBotAgentExecution rejecting
+// everything but RuntimeACP silently excluded them.
+func TestIsAgentRuntimeSessionRowCoversDirectRuntimes(t *testing.T) {
+	for _, runtimeType := range []string{"acp_agent", "codex", "claude-code"} {
+		if !isAgentRuntimeSessionRow(runtimeType, "chat") {
+			t.Fatalf("isAgentRuntimeSessionRow(%q) = false, want true", runtimeType)
+		}
+	}
+	if isAgentRuntimeSessionRow("model", "chat") {
+		t.Fatal("isAgentRuntimeSessionRow(model) = true, want false")
+	}
+	if !isAgentRuntimeSessionRow("", "acp_agent") {
+		t.Fatal("legacy acp_agent type fallback lost")
+	}
+}
+
+func TestRunTimeoutForCoversEveryExternalRuntime(t *testing.T) {
+	for _, runtimeType := range []string{"acp_agent", "codex", "claude-code"} {
+		if got := runTimeoutFor(Schedule{ExecutionConfig: ExecutionConfig{RuntimeType: runtimeType}}); got != 30*time.Minute {
+			t.Fatalf("runTimeoutFor(%q) = %s, want 30m", runtimeType, got)
+		}
+	}
+	if got := runTimeoutFor(Schedule{ExecutionConfig: ExecutionConfig{RuntimeType: "model"}}); got != 5*time.Minute {
+		t.Fatalf("runTimeoutFor(model) = %s, want 5m", got)
+	}
 }

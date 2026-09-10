@@ -1,3 +1,5 @@
+> 本仓库是社区定制版，定制功能、配套客户端与发布流程见 [定制说明](docs/custom/README.md)。上游为 [felinics/Memoh](https://github.com/felinics/Memoh)。
+
 <div align="right">
   <span>[<a href="./README.md">English</a>]<span>
   </span>[<a href="./README_CN.md">简体中文</a>]</span>

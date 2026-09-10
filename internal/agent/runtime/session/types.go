@@ -12,9 +12,17 @@ import (
 )
 
 const (
+	CommandSteer         = "steer"
+	SteerStatusPending   = "pending"
+	SteerStatusQueued    = "queued"
+	SteerStatusApplied   = "applied"
+	SteerStatusRejected  = "rejected"
 	EventRuntimeSnapshot = "runtime_snapshot"
 	EventRuntimeDelta    = "runtime_delta"
 	EventRuntimeDropped  = "runtime_dropped"
+	// EventDecisionOutput wakes a channel continuation reader. It carries no
+	// payload: the reader always resumes from its cursor in the output log.
+	EventDecisionOutput = "decision_output"
 
 	RunStatusRunning   = "running"
 	RunStatusAdmitting = "admitting"
@@ -22,21 +30,17 @@ const (
 	// execution is parked on a durable approval or ask_user decision.
 	RunStatusWaitingDecision = "waiting_decision"
 	RunStatusAborting        = "aborting"
+	RunStatusFinishing       = "finishing"
 	RunStatusCompleted       = "completed"
 	RunStatusAborted         = "aborted"
 	RunStatusErrored         = "errored"
 	RunStatusLost            = "lost"
 
-	SteerStatusPending  = "pending"
-	SteerStatusQueued   = "queued"
-	SteerStatusApplied  = "applied"
-	SteerStatusRejected = "rejected"
-
 	RunOperationRetry = "retry"
 	RunOperationEdit  = "edit"
 
 	CommandAbort                = "abort"
-	CommandSteer                = "steer_current_run"
+	CommandSteerWake            = "steer_wake"
 	CommandToolApprovalResponse = "tool_approval_response"
 	CommandUserInputResponse    = "user_input_response"
 	CommandHistoryReset         = "history_reset"
@@ -165,15 +169,19 @@ func (r RunRef) identityMatches(other RunRef) bool {
 // RunHandle identifies one admitted run. A run id can be reused by a client that
 // replays an old reservation, so owner-side mutations also carry the generation.
 type RunHandle struct {
-	BotID      string
-	SessionID  string
-	RunID      string
+	BotID     string
+	SessionID string
+	RunID     string
+	// OwnerID identifies the live execution owner for queue claims. It is
+	// intentionally carried with the handle so claim CAS checks use the same
+	// owner identity as the session runtime.
+	OwnerID    string
 	TurnID     string
 	Generation string
 	// FencingToken is the ledger ownership token for this run. Callers need it
 	// to fence their own durable writes, which is why it travels with the
 	// handle rather than staying inside the runtime. It is zero for runs
-	// started through the pre-ledger entry points.
+	// created by backend-only reservation tests.
 	FencingToken int64
 }
 
@@ -188,12 +196,14 @@ type TerminalRun struct {
 	FencingToken int64
 	State        string
 	ErrorCode    string
+	ErrorMessage string
 }
 
 func (h RunHandle) normalized() RunHandle {
 	h.BotID = strings.TrimSpace(h.BotID)
 	h.SessionID = strings.TrimSpace(h.SessionID)
 	h.RunID = strings.TrimSpace(h.RunID)
+	h.OwnerID = strings.TrimSpace(h.OwnerID)
 	h.TurnID = strings.TrimSpace(h.TurnID)
 	h.Generation = strings.TrimSpace(h.Generation)
 	return h
@@ -268,12 +278,36 @@ type CurrentRunView struct {
 	StartedAt           time.Time            `json:"started_at"`
 	UpdatedAt           time.Time            `json:"updated_at"`
 	Messages            []chatview.UIMessage `json:"messages"`
-	RequestUserTurn     *chatview.UITurn     `json:"request_user_turn,omitempty"`
-	ErrorCode           string               `json:"error_code,omitempty"`
-	Error               string               `json:"error,omitempty"`
 	Steer               *SteerState          `json:"steer,omitempty"`
 	SteerQueue          []SteerState         `json:"steer_queue,omitempty"`
-	Operation           *RunOperationView    `json:"operation,omitempty"`
+	// UserTurns is the authoritative ordered set of user inputs already
+	// admitted into this run, including the original input and applied steers.
+	// The legacy request_user_turn is derived only at the JSON boundary.
+	UserTurns []chatview.UITurn `json:"user_turns,omitempty"`
+	// SteerSupported is published only by an installed step-boundary consumer.
+	// Missing on old owners and on runtimes without that execution capability.
+	SteerSupported bool `json:"steer_supported,omitempty"`
+	// The snapshot outlives the lease key and retains the exact persistence
+	// fence needed to reconcile a durable terminal after owner expiry.
+	FencingToken int64 `json:"fencing_token,omitempty"`
+	// SteerTurns locates live queue inputs inside the run's assistant message
+	// stream. Claimed entries are provisional runtime state; applied entries
+	// point at the history turn written by the application.
+	SteerTurns             []SteerTurnView   `json:"steer_turns,omitempty"`
+	ErrorCode              string            `json:"error_code,omitempty"`
+	Error                  string            `json:"error,omitempty"`
+	ProposedTerminalStatus string            `json:"proposed_terminal_status,omitempty"`
+	FinishProposedAt       *time.Time        `json:"finish_proposed_at,omitempty"`
+	Operation              *RunOperationView `json:"operation,omitempty"`
+}
+
+type SteerTurnView struct {
+	ItemID         string    `json:"item_id" validate:"required" format:"uuid"`
+	Status         string    `json:"status" validate:"required" enums:"claimed,applied"`
+	Text           string    `json:"text" validate:"required"`
+	TurnID         string    `json:"turn_id,omitempty" format:"uuid"`
+	AfterMessageID int       `json:"after_message_id"`
+	Timestamp      time.Time `json:"timestamp" validate:"required" format:"date-time"`
 }
 
 // RunAdmissionView is the canonical state published when a reserved run
@@ -319,12 +353,15 @@ type Event struct {
 // RuntimeDelta carries only the state changed by one committed runtime
 // transition. Full snapshots are reserved for hydration and gap recovery.
 type RuntimeDelta struct {
-	CurrentRunView  *CurrentRunView         `json:"current_run_view,omitempty"`
-	Run             *CurrentRunPatch        `json:"run,omitempty"`
-	MessageAppends  []RuntimeMessageAppend  `json:"message_appends,omitempty"`
-	ProgressAppends []RuntimeProgressAppend `json:"progress_appends,omitempty"`
-	MessageUpserts  []chatview.UIMessage    `json:"message_upserts,omitempty"`
-	ResetMessages   bool                    `json:"reset_messages,omitempty"`
+	CurrentRunView    *CurrentRunView         `json:"current_run_view,omitempty"`
+	Run               *CurrentRunPatch        `json:"run,omitempty"`
+	UserTurnUpserts   []chatview.UITurn       `json:"user_turn_upserts,omitempty"`
+	SteerTurnUpserts  []SteerTurnView         `json:"steer_turn_upserts,omitempty"`
+	SteerTurnRemovals []string                `json:"steer_turn_removals,omitempty"`
+	MessageAppends    []RuntimeMessageAppend  `json:"message_appends,omitempty"`
+	ProgressAppends   []RuntimeProgressAppend `json:"progress_appends,omitempty"`
+	MessageUpserts    []chatview.UIMessage    `json:"message_upserts,omitempty"`
+	ResetMessages     bool                    `json:"reset_messages,omitempty"`
 }
 
 type CurrentRunPatch struct {
@@ -351,6 +388,8 @@ type RuntimeProgressAppend struct {
 }
 
 type Command struct {
+	SteerID      string `json:"steer_id,omitempty"`
+	Text         string `json:"text,omitempty"`
 	Type         string `json:"type"`
 	ID           string `json:"id,omitempty"`
 	ReplyOwnerID string `json:"reply_owner_id,omitempty"`
@@ -364,14 +403,16 @@ type Command struct {
 	// before routing. Owner-side execution must not consult the live UI
 	// projection again: it is derived state and may lag the durable decision.
 	DecisionResolved bool            `json:"decision_resolved,omitempty"`
-	SteerID          string          `json:"steer_id,omitempty"`
-	Text             string          `json:"text,omitempty"`
 	Payload          json.RawMessage `json:"payload,omitempty"`
 	PayloadHash      string          `json:"payload_hash,omitempty"`
 	ErrorCode        string          `json:"error_code,omitempty"`
 	Error            string          `json:"error,omitempty"`
 	CreatedAt        time.Time       `json:"created_at"`
 	ExpiresAt        time.Time       `json:"expires_at,omitempty"`
+
+	// StreamOutput is fixed at admission and travels to the owner with the command.
+	// It must not depend on subscriber liveness: disconnecting cannot change a run.
+	StreamOutput bool `json:"stream_output,omitempty"`
 }
 
 // DecisionTarget is the durable identity of one approval or user-input
@@ -388,6 +429,11 @@ type DecisionTarget struct {
 	FencingToken int64
 	ControlID    string
 	PayloadHash  string
+	// SessionRuntime is the session's runtime type. Recovery needs it to
+	// tell a native parked run (resumable: the decision continuation is
+	// rebuilt from the database) from an inline waiter run (codex, claude,
+	// ACP), whose blocked turn died with its owner and cannot be resumed.
+	SessionRuntime string
 }
 
 func (t DecisionTarget) normalized() DecisionTarget {
@@ -411,11 +457,11 @@ func (t DecisionTarget) runtimeOwned() bool {
 
 // DecisionStore is implemented by the application layer over the PostgreSQL
 // decision tables. RouteDecisionResponse uses ResolveRuntimeDecision for every
-// transport; recovery uses PendingRuntimeDecision to preserve exactly the
-// decision that parked a run while advancing its fencing token.
+// transport; recovery uses PendingRuntimeDecisions to preserve every decision
+// that parked a run while advancing its fencing token.
 type DecisionStore interface {
 	ResolveRuntimeDecision(ctx context.Context, commandType, decisionID string) (DecisionTarget, error)
-	PendingRuntimeDecision(ctx context.Context, runID string) (DecisionTarget, bool, error)
+	PendingRuntimeDecisions(ctx context.Context, runID string) ([]DecisionTarget, error)
 }
 
 // DecisionResponse is one transport-neutral answer. ControlID is minted by the
@@ -429,14 +475,23 @@ type DecisionResponse struct {
 	SessionID  string
 	RunID      string
 	Payload    json.RawMessage
+
+	// Only StreamDecisionResponse enables channel output capture.
+	streamOutput bool
 }
 
 // DecisionResponseResult separates "this is a runtime decision" from "the
 // answer changed it". A resolved terminal decision is handled but not applied;
 // an unfenced ACP/MCP request is not handled and follows its existing path.
 type DecisionResponseResult struct {
-	Handled bool
-	Applied bool
+	SessionID  string
+	Generation string
+	RunID      string
+	Handled    bool
+	Applied    bool
+
+	// Replayed acknowledges an earlier submission without rerunning its output.
+	Replayed bool
 }
 
 type Subscription struct {
@@ -456,8 +511,75 @@ type Backend interface {
 	Update(ctx context.Context, key Key, update SnapshotUpdate) (Snapshot, bool, error)
 	Publish(ctx context.Context, event Event) error
 	Subscribe(ctx context.Context, key Key) (Subscription, error)
+	DecisionOutputStore
 	Close() error
 }
+
+// DecisionOutputRef identifies the raw output log of one accepted decision
+// command. Logs are keyed per command, not per session: one run can park on a
+// second question without ending, and successive answers must not share a
+// cursor.
+type DecisionOutputRef struct {
+	BotID     string
+	CommandID string
+}
+
+// topic is the pub/sub wakeup channel for one log. Nothing is stored under this
+// key; Manager.Subscribe must not be used with it because there is no snapshot
+// to reconcile against.
+func (r DecisionOutputRef) topic() Key {
+	return Key{BotID: r.BotID, SessionID: "decision-output/" + r.CommandID}
+}
+
+// DecisionOutputLimits bounds one log. Exceeding them marks the log failed
+// rather than silently truncating it; the producer reports the overflow.
+type DecisionOutputLimits struct {
+	MaxBytes  int
+	MaxEvents int
+}
+
+// DecisionOutputState is the log's committed position after an append or read.
+type DecisionOutputState struct {
+	Exists  bool
+	Length  int
+	Bytes   int
+	Done    bool
+	Failed  bool
+	Claimed bool
+	// Applied reports whether this append changed the log. Replays of an
+	// already-committed seq and writes after a terminal marker are no-ops.
+	Applied bool
+	// Exceeded reports that this append tripped the limits and failed the log.
+	Exceeded bool
+}
+
+// DecisionOutputPage is a read from a cursor to the current end of the log.
+type DecisionOutputPage struct {
+	DecisionOutputState
+	Events []json.RawMessage
+}
+
+// DecisionOutputStore is an append-only raw event log with the same
+// lifetime/TTL as live state. It is separate from Snapshot so session state
+// keeps one meaning and each append writes one entry, not the whole log.
+//
+// Append is idempotent by seq: seq must be Length+1 to apply; seq <= Length is
+// a replay and returns the current state; a larger seq is a gap and an error.
+// A nil payload closes the log (Done). Claim hands exclusive forwarding rights
+// to one caller across processes. Release drops the stored entries once they
+// are delivered but keeps the Done/Failed/Claimed markers until the TTL: a
+// retry that arrives after delivery must still lose the claim, never replay
+// the run's output to the channel a second time.
+type DecisionOutputStore interface {
+	AppendDecisionOutput(ctx context.Context, ref DecisionOutputRef, seq int64, payload json.RawMessage, limits DecisionOutputLimits) (DecisionOutputState, error)
+	ReadDecisionOutput(ctx context.Context, ref DecisionOutputRef, from int) (DecisionOutputPage, error)
+	ClaimDecisionOutput(ctx context.Context, ref DecisionOutputRef) (bool, error)
+	ReleaseDecisionOutput(ctx context.Context, ref DecisionOutputRef) error
+}
+
+// ErrDecisionOutputSequenceGap reports an append whose seq skips uncommitted
+// entries. The producer treats it as a failed checkpoint write.
+var ErrDecisionOutputSequenceGap = errors.New("decision output sequence gap")
 
 // DistributedBackend adds cross-process run ownership and command routing.
 // MemoryBackend intentionally does not implement this interface.
@@ -466,6 +588,10 @@ type DistributedBackend interface {
 	UpdateActiveRun(ctx context.Context, key Key, runID, generation string, update ActiveRunUpdate) (Snapshot, bool, error)
 	StartRun(ctx context.Context, key Key, ref RunRef, update SnapshotUpdate) (Snapshot, bool, error)
 	ReleaseRun(ctx context.Context, key Key, ref RunRef, update ActiveRunUpdate) (Snapshot, bool, error)
+	// ReconcileTerminalRun applies an authoritative durable terminal outcome to
+	// the matching live reservation even after its lease expired. The fencing
+	// token is mandatory so a stale reaper cannot release a successor.
+	ReconcileTerminalRun(ctx context.Context, key Key, ref RunRef, update ActiveRunUpdate) (Snapshot, bool, error)
 	RenewLease(ctx context.Context, key Key, runID, ownerID, generation string, renewedAt, expiresAt time.Time) error
 	ValidateRunOwnership(ctx context.Context, key Key, ref RunRef) error
 	LoadRunRef(ctx context.Context, key Key, runID string) (RunRef, bool, error)

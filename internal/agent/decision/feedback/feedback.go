@@ -1,4 +1,4 @@
-// Package feedback defines stable user-facing Agent Control Protocol errors.
+// Package feedback defines stable user-facing External Agent errors.
 package feedback
 
 import (
@@ -29,6 +29,10 @@ const (
 	CodeAgentCommandStale     = "acp_agent_command_stale"
 	CodeImageInputUnsupported = "acp_image_input_unsupported"
 	CodeInvalidChatRuntime    = "invalid_chat_runtime"
+	// Workspace dependency feedback: a missing dependency blocks
+	// the turn and identifies the required dependency. An optional task id
+	// refers to an explicitly authorized installation already in progress.
+	CodeAgentDependencyMissing = "agent_dependency_missing"
 )
 
 type Error struct {

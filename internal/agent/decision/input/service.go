@@ -63,17 +63,12 @@ func (s *Service) HasWaiter(requestID string) bool {
 	return s != nil && s.waiter != nil && s.waiter.Has(requestID)
 }
 
-// CanRespond reports whether the UI should offer a response action for this
-// request in the current server process. ACP/MCP requests are consumed by an
-// in-process waiter, so a pending DB row alone is not enough.
+// CanRespond reports whether a waiter-backed request can accept a response in
+// this process. Native chat requests are DB-deferred and must not use this
+// helper; callers classify by the session's runtime (UsesDecisionWaiter), the
+// same way tool approvals do.
 func (s *Service) CanRespond(req Request) bool {
-	if req.Status != StatusPending {
-		return false
-	}
-	if IsProcessLocalACPRequest(req) {
-		return s.HasWaiter(req.ID)
-	}
-	return true
+	return req.Status == StatusPending && s.HasWaiter(req.ID)
 }
 
 func (s *Service) notifyResolved(req Request) {
@@ -133,6 +128,7 @@ func (s *Service) CreatePending(ctx context.Context, input CreatePendingInput) (
 	if err != nil {
 		return Request{}, err
 	}
+	enableConversationalAnswers(&uiPayload, input.ProviderMetadata)
 	rawInput, err := marshalObject(input.Input)
 	if err != nil {
 		return Request{}, err
@@ -451,6 +447,47 @@ func (s *Service) CancelPendingForSession(ctx context.Context, botID, sessionID,
 		rows, cancelErr = queries.CancelPendingUserInputsBySession(ctx, params)
 		return cancelErr
 	})
+	if err != nil {
+		return nil, err
+	}
+	requests := make([]Request, 0, len(rows))
+	for _, row := range rows {
+		req := requestFromRow(row)
+		requests = append(requests, req)
+		s.notifyResolved(req)
+	}
+	return requests, nil
+}
+
+// CancelPendingForRun invalidates only pending ask_user requests owned by one
+// exact run. It is used by runtime recovery after a run is declared lost;
+// session-wide cancellation would incorrectly expire a newer run's request.
+func (s *Service) CancelPendingForRun(ctx context.Context, botID, sessionID, runID string, fencingToken int64, reason string) ([]Request, error) {
+	if s == nil || s.queries == nil {
+		return nil, errors.New("user input queries not configured")
+	}
+	pgBotID, err := db.ParseUUID(botID)
+	if err != nil {
+		return nil, err
+	}
+	pgSessionID, err := db.ParseUUID(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	pgRunID, err := db.ParseUUID(runID)
+	if err != nil {
+		return nil, err
+	}
+	resultJSON, err := json.Marshal(canceledResult(reason))
+	if err != nil {
+		return nil, err
+	}
+	params := sqlc.CancelPendingUserInputsByRunParams{
+		BotID: pgBotID, SessionID: pgSessionID, RunID: pgRunID,
+		ResultJson:          resultJSON,
+		RuntimeFencingToken: pgtype.Int8{Int64: fencingToken, Valid: fencingToken > 0},
+	}
+	rows, err := s.queries.CancelPendingUserInputsByRun(ctx, params)
 	if err != nil {
 		return nil, err
 	}
@@ -843,21 +880,6 @@ func canceledResult(reason string) map[string]any {
 	}
 }
 
-// IsProcessLocalACPRequest reports whether the blocked consumer is an ACP
-// JSON-RPC request in this server process. Its durable row may outlive a browser
-// refresh, but it cannot outlive the ACP process and its registered waiter.
-func IsProcessLocalACPRequest(req Request) bool {
-	if req.ProviderMetadata == nil {
-		return false
-	}
-	switch strings.TrimSpace(stringValue(req.ProviderMetadata["source"])) {
-	case ProviderSourceACPMCP, ProviderSourceACPElicitation:
-		return true
-	default:
-		return false
-	}
-}
-
 func cleanIDs(values []string) []string {
 	if len(values) == 0 {
 		return nil
@@ -937,6 +959,7 @@ func requestFromRow(row sqlc.UserInputRequest) Request {
 	_ = json.Unmarshal(row.InteractionJson, &req.Interaction)
 	_ = json.Unmarshal(row.ResultJson, &req.Result)
 	_ = json.Unmarshal(row.ProviderMetadata, &req.ProviderMetadata)
+	enableConversationalAnswers(&req.UIPayload, req.ProviderMetadata)
 	return req
 }
 
@@ -1001,4 +1024,18 @@ func (s *Service) optionalChannelIdentityUUID(ctx context.Context, value string)
 		return pgtype.UUID{}, err
 	}
 	return id, nil
+}
+
+// Memoh ask_user options are shortcuts, not a closed answer schema. Apply this
+// on both creation and loading so pending questions from older versions also
+// accept text. External elicitation forms retain their provider's constraints.
+func enableConversationalAnswers(payload *UIPayload, metadata map[string]any) {
+	if source, exists := metadata["source"]; exists && source != "" && source != ProviderSourceACPMCP {
+		return
+	}
+	for i := range payload.Questions {
+		if payload.Questions[i].Kind == QuestionKindSingleSelect || payload.Questions[i].Kind == QuestionKindMultiSelect {
+			payload.Questions[i].AllowCustom = true
+		}
+	}
 }
