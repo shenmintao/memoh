@@ -320,6 +320,24 @@ func (s *Store) SaveMatrixSyncSinceToken(ctx context.Context, configID string, s
 	return nil
 }
 
+// SaveWeixinContextToken persists reply context without changing channel lifecycle timestamps.
+func (s *Store) SaveWeixinContextToken(ctx context.Context, configID, target, token, accountHash, accountToken string) error {
+	id, err := db.ParseUUID(configID)
+	if err != nil {
+		return err
+	}
+	rows, err := s.queries.SaveWeixinContextToken(ctx, sqlc.SaveWeixinContextTokenParams{
+		ID: id, Target: target, ContextToken: token, AccountHash: accountHash, AccountToken: accountToken,
+	})
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return ErrChannelConfigNotFound
+	}
+	return nil
+}
+
 // UpsertChannelIdentityConfig creates or updates a channel identity's channel binding.
 func (s *Store) UpsertChannelIdentityConfig(ctx context.Context, channelIdentityID string, channelType ChannelType, req UpsertChannelIdentityConfigRequest) (ChannelIdentityBinding, error) {
 	if s.queries == nil {

@@ -217,6 +217,39 @@ func (q *Queries) SaveMatrixSyncSinceToken(ctx context.Context, arg SaveMatrixSy
 	return result.RowsAffected(), nil
 }
 
+const saveWeixinContextToken = `-- name: SaveWeixinContextToken :execrows
+UPDATE bot_channel_configs
+SET routing = COALESCE(routing, '{}'::jsonb) || jsonb_build_object(
+  '_weixin_contexts', COALESCE(routing->'_weixin_contexts', '{}'::jsonb) ||
+  jsonb_build_object($1::text, jsonb_build_object(
+    'token', $2::text, 'account_hash', $3::text))
+)
+WHERE team_id = public.memoh_current_team_id() AND id = $4
+  AND channel_type = 'weixin' AND credentials->>'token' = $5::text
+`
+
+type SaveWeixinContextTokenParams struct {
+	Target       string      `json:"target"`
+	ContextToken string      `json:"context_token"`
+	AccountHash  string      `json:"account_hash"`
+	ID           pgtype.UUID `json:"id"`
+	AccountToken string      `json:"account_token"`
+}
+
+func (q *Queries) SaveWeixinContextToken(ctx context.Context, arg SaveWeixinContextTokenParams) (int64, error) {
+	result, err := q.db.Exec(ctx, saveWeixinContextToken,
+		arg.Target,
+		arg.ContextToken,
+		arg.AccountHash,
+		arg.ID,
+		arg.AccountToken,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const updateBotChannelConfigDisabled = `-- name: UpdateBotChannelConfigDisabled :one
 UPDATE bot_channel_configs
 SET

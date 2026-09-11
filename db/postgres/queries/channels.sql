@@ -53,6 +53,16 @@ FROM bot_channel_configs
 WHERE team_id = public.memoh_current_team_id() AND channel_type = $1
 ORDER BY created_at DESC;
 
+-- name: SaveWeixinContextToken :execrows
+UPDATE bot_channel_configs
+SET routing = COALESCE(routing, '{}'::jsonb) || jsonb_build_object(
+  '_weixin_contexts', COALESCE(routing->'_weixin_contexts', '{}'::jsonb) ||
+  jsonb_build_object(sqlc.arg(target)::text, jsonb_build_object(
+    'token', sqlc.arg(context_token)::text, 'account_hash', sqlc.arg(account_hash)::text))
+)
+WHERE team_id = public.memoh_current_team_id() AND id = sqlc.arg(id)
+  AND channel_type = 'weixin' AND credentials->>'token' = sqlc.arg(account_token)::text;
+
 -- name: GetUserChannelBinding :one
 SELECT id, user_id, channel_type, config, created_at, updated_at, team_id
 FROM user_channel_bindings

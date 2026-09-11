@@ -1953,6 +1953,12 @@ export type HandlersCreateContainerResponse = {
     workspace_backend?: string;
 };
 
+export type HandlersCreatePushEndpointRequest = {
+    bot_id?: string;
+    channel_identity_id?: string;
+    name?: string;
+};
+
 export type HandlersCreateSnapshotRequest = {
     snapshot_name?: string;
 };
@@ -2219,6 +2225,37 @@ export type HandlersProbeResponse = {
     error?: string;
     status?: string;
     tools?: Array<McpToolDescriptor>;
+};
+
+export type HandlersPushEndpoint = {
+    bot_id?: string;
+    channel_identity_id?: string;
+    created_at?: string;
+    enabled?: boolean;
+    id?: string;
+    /**
+     * Key and path appear only once at creation or key rotation.
+     */
+    key?: string;
+    name?: string;
+    path?: string;
+};
+
+export type HandlersPushEndpointList = {
+    items?: Array<HandlersPushEndpoint>;
+};
+
+export type HandlersPushReceipt = {
+    attempts?: number;
+    duplicate?: boolean;
+    error_code?: string;
+    id?: string;
+    status?: string;
+    updated_at?: string;
+};
+
+export type HandlersPushReceiptList = {
+    items?: Array<HandlersPushReceipt>;
 };
 
 export type HandlersQuickActionExecuteRequest = {
@@ -2531,6 +2568,10 @@ export type HandlersUpdateContainerResourceLimitsRequest = {
     cpu_millicores?: number;
     memory_bytes?: number;
     storage_bytes?: number;
+};
+
+export type HandlersUpdatePushEndpointRequest = {
+    enabled?: boolean;
 };
 
 export type HandlersWorkspaceDependencyCatalogItem = {
@@ -3487,6 +3528,18 @@ export type ProvidertemplatesModelResponse = {
     name?: string;
     sort_order?: number;
     type?: string;
+};
+
+export type PushPayload = {
+    content?: string;
+    event_id?: string;
+    local_number?: string;
+    message?: string;
+    remark?: string;
+    sender?: string;
+    text?: string;
+    timestamp?: string;
+    title?: string;
 };
 
 export type ReasoningOptions = {
@@ -15314,6 +15367,74 @@ export type PostProvidersByIdTestResponses = {
 
 export type PostProvidersByIdTestResponse = PostProvidersByIdTestResponses[keyof PostProvidersByIdTestResponses];
 
+export type PostPushByIdData = {
+    /**
+     * Notification (or raw text/plain)
+     */
+    body: PushPayload;
+    headers?: {
+        /**
+         * Stable event identifier
+         */
+        'Idempotency-Key'?: string;
+    };
+    path: {
+        /**
+         * Endpoint ID
+         */
+        id: string;
+    };
+    query?: {
+        /**
+         * Endpoint key (or Bearer header)
+         */
+        key?: string;
+    };
+    url: '/push/{id}';
+};
+
+export type PostPushByIdErrors = {
+    /**
+     * Bad Request
+     */
+    400: HandlersErrorResponse;
+    /**
+     * Unauthorized
+     */
+    401: HandlersErrorResponse;
+    /**
+     * Conflict
+     */
+    409: HandlersErrorResponse;
+    /**
+     * Request Entity Too Large
+     */
+    413: HandlersErrorResponse;
+    /**
+     * Too Many Requests
+     */
+    429: HandlersErrorResponse;
+    /**
+     * Bad Gateway
+     */
+    502: HandlersErrorResponse;
+    /**
+     * Service Unavailable
+     */
+    503: HandlersErrorResponse;
+};
+
+export type PostPushByIdError = PostPushByIdErrors[keyof PostPushByIdErrors];
+
+export type PostPushByIdResponses = {
+    /**
+     * OK
+     */
+    200: HandlersPushReceipt;
+};
+
+export type PostPushByIdResponse = PostPushByIdResponses[keyof PostPushByIdResponses];
+
 export type GetRuntimesStatusData = {
     body?: never;
     headers: {
@@ -16918,6 +17039,178 @@ export type PutUsersMePasswordResponses = {
      */
     204: unknown;
 };
+
+export type GetUsersMePushEndpointsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/users/me/push-endpoints';
+};
+
+export type GetUsersMePushEndpointsErrors = {
+    /**
+     * Unauthorized
+     */
+    401: HandlersErrorResponse;
+};
+
+export type GetUsersMePushEndpointsError = GetUsersMePushEndpointsErrors[keyof GetUsersMePushEndpointsErrors];
+
+export type GetUsersMePushEndpointsResponses = {
+    /**
+     * OK
+     */
+    200: HandlersPushEndpointList;
+};
+
+export type GetUsersMePushEndpointsResponse = GetUsersMePushEndpointsResponses[keyof GetUsersMePushEndpointsResponses];
+
+export type PostUsersMePushEndpointsData = {
+    /**
+     * Fixed destination
+     */
+    body: HandlersCreatePushEndpointRequest;
+    path?: never;
+    query?: never;
+    url: '/users/me/push-endpoints';
+};
+
+export type PostUsersMePushEndpointsErrors = {
+    /**
+     * Bad Request
+     */
+    400: HandlersErrorResponse;
+    /**
+     * Forbidden
+     */
+    403: HandlersErrorResponse;
+};
+
+export type PostUsersMePushEndpointsError = PostUsersMePushEndpointsErrors[keyof PostUsersMePushEndpointsErrors];
+
+export type PostUsersMePushEndpointsResponses = {
+    /**
+     * Created
+     */
+    201: HandlersPushEndpoint;
+};
+
+export type PostUsersMePushEndpointsResponse = PostUsersMePushEndpointsResponses[keyof PostUsersMePushEndpointsResponses];
+
+export type DeleteUsersMePushEndpointsByIdData = {
+    body?: never;
+    path: {
+        /**
+         * Endpoint ID
+         */
+        id: string;
+    };
+    query?: never;
+    url: '/users/me/push-endpoints/{id}';
+};
+
+export type DeleteUsersMePushEndpointsByIdResponses = {
+    /**
+     * No Content
+     */
+    204: unknown;
+};
+
+export type PatchUsersMePushEndpointsByIdData = {
+    /**
+     * Enabled state
+     */
+    body: HandlersUpdatePushEndpointRequest;
+    path: {
+        /**
+         * Endpoint ID
+         */
+        id: string;
+    };
+    query?: never;
+    url: '/users/me/push-endpoints/{id}';
+};
+
+export type PatchUsersMePushEndpointsByIdResponses = {
+    /**
+     * OK
+     */
+    200: HandlersPushEndpoint;
+};
+
+export type PatchUsersMePushEndpointsByIdResponse = PatchUsersMePushEndpointsByIdResponses[keyof PatchUsersMePushEndpointsByIdResponses];
+
+export type GetUsersMePushEndpointsByIdDeliveriesData = {
+    body?: never;
+    path: {
+        /**
+         * Endpoint ID
+         */
+        id: string;
+    };
+    query?: never;
+    url: '/users/me/push-endpoints/{id}/deliveries';
+};
+
+export type GetUsersMePushEndpointsByIdDeliveriesResponses = {
+    /**
+     * OK
+     */
+    200: HandlersPushReceiptList;
+};
+
+export type GetUsersMePushEndpointsByIdDeliveriesResponse = GetUsersMePushEndpointsByIdDeliveriesResponses[keyof GetUsersMePushEndpointsByIdDeliveriesResponses];
+
+export type PostUsersMePushEndpointsByIdRotateKeyData = {
+    body?: never;
+    path: {
+        /**
+         * Endpoint ID
+         */
+        id: string;
+    };
+    query?: never;
+    url: '/users/me/push-endpoints/{id}/rotate-key';
+};
+
+export type PostUsersMePushEndpointsByIdRotateKeyResponses = {
+    /**
+     * OK
+     */
+    200: HandlersPushEndpoint;
+};
+
+export type PostUsersMePushEndpointsByIdRotateKeyResponse = PostUsersMePushEndpointsByIdRotateKeyResponses[keyof PostUsersMePushEndpointsByIdRotateKeyResponses];
+
+export type PostUsersMePushEndpointsByIdTestData = {
+    body?: never;
+    path: {
+        /**
+         * Endpoint ID
+         */
+        id: string;
+    };
+    query?: never;
+    url: '/users/me/push-endpoints/{id}/test';
+};
+
+export type PostUsersMePushEndpointsByIdTestErrors = {
+    /**
+     * Bad Gateway
+     */
+    502: HandlersErrorResponse;
+};
+
+export type PostUsersMePushEndpointsByIdTestError = PostUsersMePushEndpointsByIdTestErrors[keyof PostUsersMePushEndpointsByIdTestErrors];
+
+export type PostUsersMePushEndpointsByIdTestResponses = {
+    /**
+     * OK
+     */
+    200: HandlersPushReceipt;
+};
+
+export type PostUsersMePushEndpointsByIdTestResponse = PostUsersMePushEndpointsByIdTestResponses[keyof PostUsersMePushEndpointsByIdTestResponses];
 
 export type GetUsersMeRuntimesData = {
     body?: never;

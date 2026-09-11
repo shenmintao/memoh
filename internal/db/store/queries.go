@@ -26,6 +26,19 @@ type HistoryTurn struct {
 // Queries is the transitional database interface implemented by sqlc-backed stores.
 // Domain-specific stores should replace this broad interface module by module.
 type Queries interface {
+	GetPushRecipientTarget(context.Context, dbsqlc.GetPushRecipientTargetParams) (pgtype.Text, error)
+	CreatePushEndpoint(context.Context, dbsqlc.CreatePushEndpointParams) (dbsqlc.PushEndpoint, error)
+	ListPushEndpoints(context.Context, pgtype.UUID) ([]dbsqlc.PushEndpoint, error)
+	GetPushEndpoint(context.Context, pgtype.UUID) (dbsqlc.PushEndpoint, error)
+	UpdatePushEndpoint(context.Context, dbsqlc.UpdatePushEndpointParams) (dbsqlc.PushEndpoint, error)
+	RotatePushEndpointKey(context.Context, dbsqlc.RotatePushEndpointKeyParams) (dbsqlc.PushEndpoint, error)
+	DeletePushEndpoint(context.Context, dbsqlc.DeletePushEndpointParams) (int64, error)
+	ClaimPushDelivery(context.Context, dbsqlc.ClaimPushDeliveryParams) (dbsqlc.PushDelivery, error)
+	GetPushDelivery(context.Context, dbsqlc.GetPushDeliveryParams) (dbsqlc.PushDelivery, error)
+	FinishPushDelivery(context.Context, dbsqlc.FinishPushDeliveryParams) error
+	ListPushDeliveries(context.Context, pgtype.UUID) ([]dbsqlc.PushDelivery, error)
+	PrunePushDeliveries(context.Context, pgtype.UUID) error
+	SaveWeixinContextToken(context.Context, dbsqlc.SaveWeixinContextTokenParams) (int64, error)
 	ClaimBotDependencyOperation(ctx context.Context, arg dbsqlc.ClaimBotDependencyOperationParams) (dbsqlc.BotDependencyInstallation, error)
 	FinishBotDependencyOperation(ctx context.Context, arg dbsqlc.FinishBotDependencyOperationParams) (dbsqlc.BotDependencyInstallation, error)
 	DeleteBotDependencyOperation(ctx context.Context, arg dbsqlc.DeleteBotDependencyOperationParams) (dbsqlc.BotDependencyInstallation, error)

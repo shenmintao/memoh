@@ -22,6 +22,7 @@ type WeixinAdapter struct {
 	client       *Client
 	contextCache *contextTokenCache
 	assets       assetOpener
+	saveContext  func(context.Context, string, string, string, string, string) error
 }
 
 // NewWeixinAdapter creates a new WeChat adapter.
@@ -32,7 +33,7 @@ func NewWeixinAdapter(log *slog.Logger) *WeixinAdapter {
 	return &WeixinAdapter{
 		logger:       log.With(slog.String("adapter", "weixin")),
 		client:       NewClient(log),
-		contextCache: newContextTokenCache(24 * time.Hour),
+		contextCache: newContextTokenCache(0),
 	}
 }
 
@@ -220,8 +221,7 @@ func (a *WeixinAdapter) pollLoop(ctx context.Context, cfg channel.ChannelConfig,
 
 			// Cache context_token for outbound replies.
 			if strings.TrimSpace(msg.ContextToken) != "" {
-				cacheKey := cfg.ID + ":" + strings.TrimSpace(msg.FromUserID)
-				a.contextCache.Put(cacheKey, msg.ContextToken)
+				a.rememberContext(ctx, cfg, msg.FromUserID, msg.ContextToken)
 			}
 
 			inbound.BotID = cfg.BotID
@@ -263,11 +263,9 @@ func (a *WeixinAdapter) Send(ctx context.Context, cfg channel.ChannelConfig, msg
 		return errors.New("weixin target is required")
 	}
 
-	cacheKey := cfg.ID + ":" + target
-	contextToken, ok := a.contextCache.Get(cacheKey)
-	if !ok {
-		return fmt.Errorf("weixin: no context_token cached for target %s (reply-only channel — message can only be sent after receiving an inbound message)", target)
-	}
+	// Tencent's current sender permits a missing context token. Prefer saved
+	// context when available, and let sendmessage enforce platform eligibility.
+	contextToken, _ := a.resolveContext(cfg, target)
 
 	// Send attachments first if present (media + text in one flow).
 	if len(msg.Message.Attachments) > 0 {
@@ -408,8 +406,7 @@ func (a *WeixinAdapter) ProcessingStarted(ctx context.Context, cfg channel.Chann
 		return channel.ProcessingStatusHandle{}, nil
 	}
 
-	cacheKey := cfg.ID + ":" + target
-	contextToken, _ := a.contextCache.Get(cacheKey)
+	contextToken, _ := a.resolveContext(cfg, target)
 
 	configResp, err := a.client.GetConfig(ctx, parsed, target, contextToken)
 	if err != nil || strings.TrimSpace(configResp.TypingTicket) == "" {

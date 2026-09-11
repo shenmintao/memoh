@@ -106,6 +106,7 @@ func commonOptions() fx.Option {
 			provideServerHandler(handlers.NewACLHandler),
 			provideServerHandler(handlers.NewBotUserAccessHandler),
 			provideServerHandler(handlers.NewChannelAccessHandler),
+			provideServerHandler(handlers.NewPushHandler),
 			provideServerHandler(handlers.NewScheduleHandler),
 			provideServerHandler(handlers.NewCompactionHandler),
 			provideServerHandler(handlers.NewChannelHandler),

@@ -73,6 +73,7 @@
 
         <!-- Connected IM Accounts -->
         <ConnectedAccountsSection />
+        <PushEndpointsSection />
 
         <!-- Card 3 · Session: user id + sign out (low-frequency, kept at the bottom). -->
         <SettingsSection :title="$t('settings.sessionSection')">
@@ -137,6 +138,7 @@ import ModelSelect from '@/pages/bots/components/model-select.vue'
 import ProfileIdentity from './components/profile-identity.vue'
 import PasswordSection from './components/password-section.vue'
 import ConnectedAccountsSection from './components/connected-accounts-section.vue'
+import PushEndpointsSection from './components/push-endpoints-section.vue'
 
 import { getModels, getProviders, getUsersMe, putUsersMe, putUsersMePassword } from '@memohai/sdk'
 import type { AccountsAccount, AccountsUpdateProfileRequest, AccountsUpdatePasswordRequest } from '@memohai/sdk'

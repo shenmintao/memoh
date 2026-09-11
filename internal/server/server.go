@@ -7,6 +7,7 @@ import (
 	neturl "net/url"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 
@@ -58,7 +59,7 @@ func newServer(log *slog.Logger, addr string, jwtSecret string,
 	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
 		AllowOrigins:  []string{"*"},
 		AllowMethods:  []string{echo.GET, echo.HEAD, echo.POST, echo.PUT, echo.PATCH, echo.DELETE, echo.OPTIONS},
-		AllowHeaders:  []string{echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept, echo.HeaderAuthorization, echo.HeaderXRequestID},
+		AllowHeaders:  []string{echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept, echo.HeaderAuthorization, echo.HeaderXRequestID, "Idempotency-Key"},
 		ExposeHeaders: []string{echo.HeaderXRequestID},
 	}))
 	e.Use(middleware.RequestLoggerWithConfig(middleware.RequestLoggerConfig{
@@ -104,6 +105,9 @@ func (s *Server) Stop(ctx context.Context) error {
 }
 
 func shouldSkipJWT(path string) bool {
+	if isPushReceivePath(path) {
+		return true
+	}
 	// This exact endpoint authenticates live ACP runtime tokens in its handler.
 	parts := strings.Split(path, "/")
 	if len(parts) == 4 && parts[0] == "" && parts[1] == "bots" && parts[2] != "" && parts[3] == "runtime-tools" {
@@ -158,7 +162,18 @@ func isPublicSupermarketSkillIconPath(path string) bool {
 }
 
 func shouldLimitPublicRequestBody(path string) bool {
-	return isPublicChannelWebhookPath(path)
+	return isPublicChannelWebhookPath(path) || isPushReceivePath(path)
+}
+
+// Only the UUID-addressed receiver accepts endpoint credentials. Management
+// routes and sibling paths always retain the normal user authentication.
+func isPushReceivePath(path string) bool {
+	id, ok := strings.CutPrefix(path, "/push/")
+	if !ok || len(id) != 36 {
+		return false
+	}
+	_, err := uuid.Parse(id)
+	return err == nil
 }
 
 func isPublicChannelWebhookPath(path string) bool {
@@ -179,6 +194,10 @@ func safeRequestLogURI(u *neturl.URL, fallback string) string {
 		return fallback
 	}
 	escapedPath := u.EscapedPath()
+	if strings.HasPrefix(u.Path, "/push/") {
+		// Devices may put credentials in the query; never log any query data.
+		return escapedPath
+	}
 	if isPublicChannelMediaPath(escapedPath) {
 		return escapedPath
 	}

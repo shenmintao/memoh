@@ -25,9 +25,6 @@ type assetOpener interface {
 
 // sendText sends a plain text message through the WeChat API.
 func sendText(ctx context.Context, client *Client, cfg adapterConfig, target, text, contextToken string) error {
-	if strings.TrimSpace(contextToken) == "" {
-		return errors.New("weixin: context_token is required to send messages")
-	}
 	clientID := generateClientID()
 	req := SendMessageRequest{
 		Msg: WeixinMessage{

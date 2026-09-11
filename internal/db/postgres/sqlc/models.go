@@ -761,6 +761,32 @@ type ProviderOauthToken struct {
 	TeamID           pgtype.UUID        `json:"team_id"`
 }
 
+type PushDelivery struct {
+	ID          pgtype.UUID        `json:"id"`
+	TeamID      pgtype.UUID        `json:"team_id"`
+	EndpointID  pgtype.UUID        `json:"endpoint_id"`
+	DedupeKey   string             `json:"dedupe_key"`
+	PayloadHash string             `json:"payload_hash"`
+	Status      string             `json:"status"`
+	Attempts    int32              `json:"attempts"`
+	ErrorCode   string             `json:"error_code"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+}
+
+type PushEndpoint struct {
+	ID                pgtype.UUID        `json:"id"`
+	TeamID            pgtype.UUID        `json:"team_id"`
+	UserID            pgtype.UUID        `json:"user_id"`
+	BotID             pgtype.UUID        `json:"bot_id"`
+	ChannelIdentityID pgtype.UUID        `json:"channel_identity_id"`
+	Name              string             `json:"name"`
+	TokenHash         string             `json:"token_hash"`
+	Enabled           bool               `json:"enabled"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
+}
+
 type Schedule struct {
 	ID              pgtype.UUID        `json:"id"`
 	Name            string             `json:"name"`

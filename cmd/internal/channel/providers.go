@@ -304,6 +304,11 @@ func provideCommandHandler(
 }
 
 func provideChannelManager(log *slog.Logger, registry *channel.Registry, channelStore *channel.Store, channelRouter *inbound.ChannelInboundProcessor, mediaService *media.Service) *channel.Manager {
+	if adapter, ok := registry.Get(weixin.Type); ok {
+		if weixinAdapter, ok := adapter.(*weixin.WeixinAdapter); ok {
+			weixinAdapter.SetContextTokenSaver(channelStore.SaveWeixinContextToken)
+		}
+	}
 	if adapter, ok := registry.Get(matrix.Type); ok {
 		if matrixAdapter, ok := adapter.(*matrix.MatrixAdapter); ok {
 			matrixAdapter.SetSyncStateSaver(channelStore.SaveMatrixSyncSinceToken)

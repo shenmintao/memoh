@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -145,8 +146,47 @@ func (c *Client) SendMessage(ctx context.Context, cfg adapterConfig, msg SendMes
 	if err != nil {
 		return err
 	}
-	_, err = c.apiPost(ctx, cfg.BaseURL, "ilink/bot/sendmessage", body, cfg.Token, defaultAPITimeout)
-	return err
+	raw, err := c.apiPost(ctx, cfg.BaseURL, "ilink/bot/sendmessage", body, cfg.Token, defaultAPITimeout)
+	if err != nil {
+		return err
+	}
+	var result struct {
+		MessageID json.RawMessage `json:"message_id"`
+		Ret       *int            `json:"ret"`
+		ErrCode   *int            `json:"errcode"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return fmt.Errorf("weixin sendmessage invalid response: %w", err)
+	}
+	if result.Ret == nil && result.ErrCode == nil && !validSentMessageID(result.MessageID) {
+		return errors.New("weixin sendmessage response contains no result code")
+	}
+	ret, errCode := 0, 0
+	if result.Ret != nil {
+		ret = *result.Ret
+	}
+	if result.ErrCode != nil {
+		errCode = *result.ErrCode
+	}
+	if ret != 0 || errCode != 0 {
+		// Do not put provider response bodies (potentially message content) in logs.
+		return fmt.Errorf("weixin sendmessage rejected: ret=%d errcode=%d", ret, errCode)
+	}
+	return nil
+}
+
+// validSentMessageID accepts both string and positive numeric message IDs.
+func validSentMessageID(raw json.RawMessage) bool {
+	var text string
+	if json.Unmarshal(raw, &text) == nil && strings.TrimSpace(text) != "" {
+		return true
+	}
+	var number json.Number
+	if json.Unmarshal(raw, &number) == nil {
+		value, err := number.Float64()
+		return err == nil && value > 0
+	}
+	return false
 }
 
 // GetConfig fetches bot config (typing_ticket etc.).

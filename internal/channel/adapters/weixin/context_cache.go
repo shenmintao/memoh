@@ -7,9 +7,8 @@ import (
 )
 
 // contextTokenCache stores the latest context_token per target user.
-// The WeChat API requires a context_token (issued per inbound message)
-// for every outbound send. This cache is populated by the long-poll
-// receiver and read by the sender, similar to WeCom's callbackContextCache.
+// Tokens follow Tencent's per-account persistence model. A zero TTL retains
+// them until replaced; the platform decides whether a saved token remains valid.
 type contextTokenCache struct {
 	mu    sync.RWMutex
 	items map[string]contextTokenEntry
@@ -22,9 +21,6 @@ type contextTokenEntry struct {
 }
 
 func newContextTokenCache(ttl time.Duration) *contextTokenCache {
-	if ttl <= 0 {
-		ttl = 24 * time.Hour
-	}
 	return &contextTokenCache{
 		items: make(map[string]contextTokenEntry),
 		ttl:   ttl,
@@ -56,7 +52,7 @@ func (c *contextTokenCache) Get(target string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	if time.Since(entry.CreatedAt) > c.ttl {
+	if c.ttl > 0 && time.Since(entry.CreatedAt) > c.ttl {
 		c.mu.Lock()
 		delete(c.items, key)
 		c.mu.Unlock()
@@ -71,7 +67,7 @@ func (c *contextTokenCache) gcLocked() {
 	}
 	now := time.Now().UTC()
 	for key, entry := range c.items {
-		if now.Sub(entry.CreatedAt) > c.ttl {
+		if c.ttl > 0 && now.Sub(entry.CreatedAt) > c.ttl {
 			delete(c.items, key)
 		}
 	}
