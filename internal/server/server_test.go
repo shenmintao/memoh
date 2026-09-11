@@ -203,12 +203,14 @@ func TestServerKeepsLegacyHTTPErrorBehavior(t *testing.T) {
 	}
 }
 
-func TestShouldSkipJWTOnlyForRuntimeConnectEndpoint(t *testing.T) {
+func TestShouldSkipJWTOnlyForRuntimeKeyEndpoints(t *testing.T) {
 	t.Parallel()
-	if !shouldSkipJWT("/runtimes/connect") {
-		t.Fatal("Runtime key endpoint must authenticate before JWT middleware")
+	for _, path := range []string{"/runtimes/connect", "/runtimes/status"} {
+		if !shouldSkipJWT(path) {
+			t.Fatalf("Runtime key endpoint %q must authenticate before JWT middleware", path)
+		}
 	}
-	for _, path := range []string{"/runtimes", "/runtimes/connect/extra", "/users/me/runtimes"} {
+	for _, path := range []string{"/runtimes", "/runtimes/connect/extra", "/runtimes/status/extra", "/users/me/runtimes"} {
 		if shouldSkipJWT(path) {
 			t.Fatalf("path=%q unexpectedly skips JWT", path)
 		}

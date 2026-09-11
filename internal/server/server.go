@@ -109,7 +109,7 @@ func shouldSkipJWT(path string) bool {
 	if len(parts) == 4 && parts[0] == "" && parts[1] == "bots" && parts[2] != "" && parts[3] == "runtime-tools" {
 		return true
 	}
-	if path == "/" || path == "/ping" || path == "/health" || path == "/api/swagger.json" || path == "/auth/login" || path == "/runtimes/connect" {
+	if path == "/" || path == "/ping" || path == "/health" || path == "/api/swagger.json" || path == "/auth/login" || path == "/runtimes/connect" || path == "/runtimes/status" {
 		return true
 	}
 	if strings.HasPrefix(path, "/assets/") {

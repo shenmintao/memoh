@@ -46,6 +46,7 @@ func NewRuntimeConnectHandler(log *slog.Logger, service *userruntime.Service, pi
 
 func (h *RuntimeConnectHandler) Register(e *echo.Echo) {
 	e.GET("/runtimes/connect", h.Connect)
+	e.GET("/runtimes/status", h.Status)
 }
 
 func (h *RuntimeConnectHandler) Connect(c echo.Context) error {

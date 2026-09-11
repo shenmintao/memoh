@@ -14009,6 +14009,47 @@ const docTemplate = `{
                 }
             }
         },
+        "/runtimes/status": {
+            "get": {
+                "description": "Authenticate with this device's Runtime Key. Returns the same live connection state used by the computer list, without credentials or other devices.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "user-runtimes"
+                ],
+                "summary": "Get this Remote Runtime's server-side connection status",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Bearer Runtime Key",
+                        "name": "Authorization",
+                        "in": "header",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.RuntimeConnectionStatus"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/search-providers": {
             "get": {
                 "description": "List configured search providers",
@@ -22346,6 +22387,20 @@ const docTemplate = `{
             "properties": {
                 "version": {
                     "type": "integer"
+                }
+            }
+        },
+        "handlers.RuntimeConnectionStatus": {
+            "type": "object",
+            "properties": {
+                "checked_at": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "online": {
+                    "type": "boolean"
                 }
             }
         },

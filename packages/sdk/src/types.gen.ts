@@ -2241,6 +2241,12 @@ export type HandlersRollbackRequest = {
     version?: number;
 };
 
+export type HandlersRuntimeConnectionStatus = {
+    checked_at?: string;
+    id?: string;
+    online?: boolean;
+};
+
 export type HandlersSafeSkillsResponse = {
     skills?: Array<SkillsSafeCatalogItem>;
 };
@@ -15307,6 +15313,41 @@ export type PostProvidersByIdTestResponses = {
 };
 
 export type PostProvidersByIdTestResponse = PostProvidersByIdTestResponses[keyof PostProvidersByIdTestResponses];
+
+export type GetRuntimesStatusData = {
+    body?: never;
+    headers: {
+        /**
+         * Bearer Runtime Key
+         */
+        Authorization: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/runtimes/status';
+};
+
+export type GetRuntimesStatusErrors = {
+    /**
+     * Unauthorized
+     */
+    401: HandlersErrorResponse;
+    /**
+     * Service Unavailable
+     */
+    503: HandlersErrorResponse;
+};
+
+export type GetRuntimesStatusError = GetRuntimesStatusErrors[keyof GetRuntimesStatusErrors];
+
+export type GetRuntimesStatusResponses = {
+    /**
+     * OK
+     */
+    200: HandlersRuntimeConnectionStatus;
+};
+
+export type GetRuntimesStatusResponse = GetRuntimesStatusResponses[keyof GetRuntimesStatusResponses];
 
 export type GetSearchProvidersData = {
     body?: never;

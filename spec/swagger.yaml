@@ -3904,6 +3904,15 @@ definitions:
       version:
         type: integer
     type: object
+  handlers.RuntimeConnectionStatus:
+    properties:
+      checked_at:
+        type: string
+      id:
+        type: string
+      online:
+        type: boolean
+    type: object
   handlers.SafeSkillsResponse:
     properties:
       skills:
@@ -16402,6 +16411,34 @@ paths:
       summary: OAuth2 callback for LLM providers
       tags:
       - providers-oauth
+  /runtimes/status:
+    get:
+      description: Authenticate with this device's Runtime Key. Returns the same live
+        connection state used by the computer list, without credentials or other devices.
+      parameters:
+      - description: Bearer Runtime Key
+        in: header
+        name: Authorization
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handlers.RuntimeConnectionStatus'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/handlers.ErrorResponse'
+      summary: Get this Remote Runtime's server-side connection status
+      tags:
+      - user-runtimes
   /search-providers:
     get:
       consumes:
